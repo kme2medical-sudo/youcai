@@ -13,14 +13,27 @@ import {
   isActive,
   isLeadership,
   hasPermission,
+  hasAccessProof,
+  accessMethodLabel,
   requiresLegalName,
   type User,
 } from "./types";
 import { Button, Field, safeWebsite, formatDate } from "./ui";
 import { AuthPage, validatePasswordConfirmation, verifyEmail } from "./auth";
+import {
+  AdminSetupPage,
+  AdminSetupForm,
+  checkAdminSetup,
+  createAdminPassword,
+  INVALID_ADMIN_SETUP_LINK,
+  isAdminSetupToken,
+  validateAdminSetup,
+} from "./admin-setup";
+import { Profile } from "./dashboard";
+import { UserModal } from "./users";
 
 const authState = vi.hoisted(() => ({
-  user: null,
+  user: null as User | null,
   loading: false,
   error: null,
   emailReady: true as boolean | null,
@@ -30,7 +43,8 @@ const authState = vi.hoisted(() => ({
 }));
 vi.mock("./session", () => ({
   useAuth: () => authState,
-  EmailSetupBanner: () => null,
+  EmailSetupBanner: () =>
+    authState.emailReady === false ? "Test email setup warning" : null,
   AccountStatus: () => null,
 }));
 
@@ -56,6 +70,8 @@ const json = (body: unknown, status = 200) =>
   });
 beforeEach(() => {
   setCsrfToken();
+  vi.clearAllMocks();
+  authState.user = null;
   authState.emailReady = true;
   vi.stubGlobal("fetch", vi.fn());
   vi.stubGlobal("window", {
@@ -447,6 +463,7 @@ describe("unconditional route manifest", () => {
       "/",
       "/login",
       "/register",
+      "/admin-setup",
       "/verify-email",
       "/forgot-password",
       "/reset-password",
@@ -467,5 +484,434 @@ describe("unconditional route manifest", () => {
       expect(source).toContain(`leadership permission="${permission}"`);
     expect(source).not.toContain("startLogin");
     expect(source).not.toContain("trpc");
+  });
+});
+
+describe("private owner-provisioned administrator setup", () => {
+  const token = "A".repeat(43); // Synthetic test input, never a provisioned capability.
+  const password = "Synthetic test password only";
+  const renderSetup = () =>
+    renderToStaticMarkup(
+      createElement(Router, {
+        ssrPath: "/admin-setup",
+        children: createElement(AdminSetupPage),
+      })
+    );
+  const renderForm = () =>
+    renderToStaticMarkup(
+      createElement(AdminSetupForm, {
+        token,
+        email: "invited@example.invalid",
+        onCreated: vi.fn(),
+        onInvalid: vi.fn(),
+      })
+    );
+
+  it.each(["", "short", "A".repeat(42), "A".repeat(44), "!".repeat(43)])(
+    "rejects malformed private capabilities before any request (%s)",
+    async value => {
+      expect(isAdminSetupToken(value)).toBe(false);
+      await expect(checkAdminSetup(value)).rejects.toThrow(
+        INVALID_ADMIN_SETUP_LINK
+      );
+      await expect(
+        createAdminPassword(value, "Test Name", password, password)
+      ).rejects.toThrow(INVALID_ADMIN_SETUP_LINK);
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  );
+  it("accepts only the specified base64url token shape", () => {
+    expect(isAdminSetupToken(token)).toBe(true);
+    expect(isAdminSetupToken("_-".repeat(21) + "A")).toBe(true);
+  });
+  it.each(["", " ", "x", "x".repeat(161)])(
+    "validates the trimmed full name (%s)",
+    async name => {
+      expect(validateAdminSetup(name, password, password)).toBe(
+        "Enter your full name using 2–160 characters."
+      );
+      await expect(
+        createAdminPassword(token, name, password, password)
+      ).rejects.toThrow("Enter your full name");
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  );
+  it.each([2, 160])("accepts a %s-character name", length => {
+    expect(
+      validateAdminSetup("x".repeat(length), password, password)
+    ).toBeNull();
+  });
+  it.each([0, 11, 129])(
+    "rejects a %s-character setup password before submission",
+    async length => {
+      const value = "x".repeat(length);
+      await expect(
+        createAdminPassword(token, "Test Name", value, value)
+      ).rejects.toThrow("12–128");
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  );
+  it.each([12, 128])(
+    "accepts matching %s-character setup passwords",
+    length => {
+      const value = "x".repeat(length);
+      expect(validateAdminSetup("Test Name", value, value)).toBeNull();
+    }
+  );
+  it("requires exact password confirmation and preserves spaces", async () => {
+    await expect(
+      createAdminPassword(token, "Test Name", password, `${password} `)
+    ).rejects.toThrow("The passwords do not match.");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(
+      validateAdminSetup(" Test Name ", ` ${password} `, ` ${password} `)
+    ).toBeNull();
+  });
+  it("checks the private capability via strict token-only POST, not GET", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      json({ email: "invited@example.invalid" })
+    );
+    const controller = new AbortController();
+    await expect(checkAdminSetup(token, controller.signal)).resolves.toEqual({
+      email: "invited@example.invalid",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/auth/admin-setup/check",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({ token }),
+        signal: controller.signal,
+      })
+    );
+    expect(window.history.replaceState).not.toHaveBeenCalled();
+    expect(authState.login).not.toHaveBeenCalled();
+    expect(authState.refresh).not.toHaveBeenCalled();
+  });
+  it("does not accept an unexpected check response as a valid invitation", async () => {
+    vi.mocked(fetch).mockResolvedValue(json({ message: "Not a check DTO" }));
+    await expect(checkAdminSetup(token)).rejects.toThrow(
+      INVALID_ADMIN_SETUP_LINK
+    );
+  });
+  it("renders a clear invalid-link message without exposing an email or creating an account", () => {
+    const markup = renderSetup();
+    expect(markup).toContain(INVALID_ADMIN_SETUP_LINK);
+    expect(markup).not.toContain("Email address");
+    expect(markup).not.toContain('name="password"');
+    expect(markup).not.toContain("Create my password");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("rejects ambiguous repeated token parameters", () => {
+    window.location.search = `?token=${token}&token=${token}`;
+    expect(renderSetup()).toContain(INVALID_ADMIN_SETUP_LINK);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("shows only the non-consuming check state on initial private-link rendering", () => {
+    window.location.search = `?token=${token}`;
+    const markup = renderSetup();
+    expect(markup).toContain("Checking your private setup link");
+    expect(markup).not.toContain(token);
+    expect(markup).not.toContain("Email address");
+    expect(markup).not.toContain('name="password"');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(window.history.replaceState).not.toHaveBeenCalled();
+  });
+  it("limits the mount effect to check, never claim or login", () => {
+    const source = fs.readFileSync(
+      path.join(import.meta.dirname, "admin-setup.tsx"),
+      "utf8"
+    );
+    const effect = source.slice(
+      source.indexOf("  useEffect(() => {"),
+      source.indexOf("  }, [token, revision]);")
+    );
+    expect(effect).toContain("checkAdminSetup(token, controller.signal)");
+    expect(effect).not.toContain("createAdminPassword");
+    expect(effect).not.toContain('/auth/admin-setup"');
+    expect(source).not.toContain("useAuth");
+    expect(source).not.toContain("emailReady");
+    expect(source).not.toContain("EmailSetupBanner");
+  });
+  it("renders readonly owner-assigned email and accessible exact-contract fields", () => {
+    const markup = renderForm();
+    expect(markup).toContain("Create my password");
+    const emailInput = markup.match(/<input[^>]*type="email"[^>]*>/)?.[0];
+    expect(emailInput).toContain('readOnly=""');
+    expect(emailInput).toContain('value="invited@example.invalid"');
+    expect(emailInput).not.toContain("name=");
+    const nameInput = markup.match(/<input[^>]*name="fullName"[^>]*>/)?.[0];
+    expect(nameInput).toContain('minLength="2"');
+    expect(nameInput).toContain('maxLength="160"');
+    for (const name of ["password", "confirmPassword"]) {
+      const input = markup.match(
+        new RegExp(`<input[^>]*name="${name}"[^>]*>`)
+      )?.[0];
+      expect(input).toContain('type="password"');
+      expect(input).toContain('autoComplete="new-password"');
+      expect(input).toContain('minLength="12"');
+      expect(input).toContain('maxLength="128"');
+      expect(input).toContain('required=""');
+      const id = input?.match(/id="([^"]+)"/)?.[1];
+      expect(markup).toContain(`for="${id}"`);
+    }
+    expect(markup).toContain('aria-label="Show password"');
+    expect(markup).not.toContain('name="token"');
+    expect(markup).not.toContain('name="roles"');
+    expect(markup).not.toContain("Requested role");
+    expect(markup).not.toContain(token);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each([false, null])(
+    "does not depend on email-provider availability (%s)",
+    readiness => {
+      authState.emailReady = readiness;
+      const markup = renderForm();
+      const button = markup.match(/<button[^>]*type="submit"[^>]*>/)?.[0];
+      expect(button).toBeTruthy();
+      expect(button).not.toContain("disabled");
+      expect(markup).not.toContain("Test email setup warning");
+    }
+  );
+  it("claims only token, trimmed fullName, and exact password, clears URL, and never auto-signs-in", async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      json({ message: "Password created. Sign in to continue." })
+    );
+    const chosen = ` ${password} `;
+    await expect(
+      createAdminPassword(token, " Test Name ", chosen, chosen)
+    ).resolves.toEqual({ message: "Password created. Sign in to continue." });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/auth/admin-setup",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({
+          token,
+          fullName: "Test Name",
+          password: chosen,
+        }),
+      })
+    );
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(Object.keys(body).sort()).toEqual(["fullName", "password", "token"]);
+    expect(body).not.toHaveProperty("email");
+    expect(body).not.toHaveProperty("roles");
+    expect(body).not.toHaveProperty("confirmPassword");
+    expect(window.history.replaceState).toHaveBeenCalledTimes(1);
+    expect(window.history.replaceState).toHaveBeenCalledWith(
+      null,
+      "",
+      "/admin-setup"
+    );
+    expect(authState.login).not.toHaveBeenCalled();
+    expect(authState.refresh).not.toHaveBeenCalled();
+  });
+  it("does not remove the link or claim success before the explicit claim completes", async () => {
+    let complete!: (response: Response) => void;
+    vi.mocked(fetch).mockReturnValue(
+      new Promise(resolve => {
+        complete = resolve;
+      })
+    );
+    const claim = createAdminPassword(token, "Test Name", password, password);
+    expect(window.history.replaceState).not.toHaveBeenCalled();
+    complete(json({ message: "Password created" }));
+    await claim;
+    expect(window.history.replaceState).toHaveBeenCalledTimes(1);
+  });
+  it.each([400, 409, 410])(
+    "preserves rejected private-link errors (%s) without claiming success",
+    async status => {
+      vi.mocked(fetch).mockResolvedValue(
+        json({ message: "This link is invalid or expired" }, status)
+      );
+      await expect(
+        createAdminPassword(token, "Test Name", password, password)
+      ).rejects.toThrow("This link is invalid or expired");
+      expect(window.history.replaceState).not.toHaveBeenCalled();
+      expect(authState.login).not.toHaveBeenCalled();
+    }
+  );
+  it("never persists or logs private credentials", async () => {
+    const storage = { setItem: vi.fn(), getItem: vi.fn() };
+    vi.stubGlobal("localStorage", storage);
+    vi.stubGlobal("sessionStorage", storage);
+    Object.assign(window, { localStorage: storage, sessionStorage: storage });
+    const spies = [
+      vi.spyOn(console, "log"),
+      vi.spyOn(console, "warn"),
+      vi.spyOn(console, "error"),
+    ];
+    try {
+      window.location.search = `?token=${token}`;
+      renderSetup();
+      renderForm();
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(json({ email: "invited@example.invalid" }))
+        .mockResolvedValueOnce(json({ message: "Password created" }));
+      await checkAdminSetup(token);
+      await createAdminPassword(token, "Test Name", password, password);
+      expect(storage.setItem).not.toHaveBeenCalled();
+      expect(storage.getItem).not.toHaveBeenCalled();
+      for (const spy of spies) {
+        expect(JSON.stringify(spy.mock.calls)).not.toContain(token);
+        expect(JSON.stringify(spy.mock.calls)).not.toContain(password);
+      }
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+});
+
+describe("owner-authorized access remains separate from email verification", () => {
+  const ownerProvisioned = (overrides: Partial<User> = {}) =>
+    fixture({
+      emailVerified: false,
+      accessAuthorized: true,
+      accessMethod: "OWNER_PROVISIONED",
+      roles: ["admin"],
+      permissions: ["users.read", "users.manage", "users.approve"],
+      ...overrides,
+    });
+  it("grants active owner-provisioned users only their effective permissions", () => {
+    const user = ownerProvisioned();
+    expect(user.emailVerified).toBe(false);
+    expect(hasAccessProof(user)).toBe(true);
+    expect(isActive(user)).toBe(true);
+    expect(hasPermission(user, "users.manage")).toBe(true);
+    expect(hasPermission(user, "customers.archive")).toBe(false);
+    expect(isLeadership(user)).toBe(true);
+    expect(accessMethodLabel(user)).toBe("Owner-provisioned");
+  });
+  it.each(["UNVERIFIED", "PENDING_APPROVAL", "SUSPENDED", "REJECTED"] as const)(
+    "denies %s accounts even with owner authorization",
+    status => {
+      const user = ownerProvisioned({ status });
+      expect(isActive(user)).toBe(false);
+      expect(hasPermission(user, "users.manage")).toBe(false);
+    }
+  );
+  it("never treats an access-method label, role, or truthy nonboolean value as proof", () => {
+    expect(isActive(ownerProvisioned({ accessAuthorized: false }))).toBe(false);
+    expect(isActive(ownerProvisioned({ accessAuthorized: undefined }))).toBe(
+      false
+    );
+    expect(
+      isActive(
+        ownerProvisioned({ accessAuthorized: "true" as unknown as boolean })
+      )
+    ).toBe(false);
+    expect(isActive(null)).toBe(false);
+    expect(isActive(undefined)).toBe(false);
+    expect(isActive(fixture())).toBe(true);
+  });
+  it("the actual page gate retains active-status and permission/leadership checks", () => {
+    const source = fs.readFileSync(
+      path.join(import.meta.dirname, "session.tsx"),
+      "utf8"
+    );
+    expect(source).toContain(
+      "if (!isActive(auth.user)) return <AccountStatus />;"
+    );
+    expect(source).toContain("!auth.user.permissions.includes(permission)");
+    expect(source).toContain("!isLeadership(auth.user)");
+  });
+  it("profile truthfully shows owner provisioning and unverified email separately", () => {
+    authState.user = ownerProvisioned();
+    const markup = renderToStaticMarkup(
+      createElement(Router, {
+        ssrPath: "/profile",
+        children: createElement(Profile),
+      })
+    );
+    expect(markup).toContain("Email ownership");
+    expect(markup).toContain("Not verified");
+    expect(markup).toContain("Access authorization");
+    expect(markup).toContain("Owner-provisioned");
+    expect(markup).not.toContain("Email verified");
+  });
+  it("user management permits active owner-authorized accounts without requiring email proof", () => {
+    authState.user = ownerProvisioned();
+    const markup = renderToStaticMarkup(
+      createElement(UserModal, {
+        account: ownerProvisioned({ id: "other-test-user" }),
+        onClose: vi.fn(),
+        onSaved: vi.fn(),
+      })
+    );
+    const active = markup.match(/<option[^>]*value="ACTIVE"[^>]*>/)?.[0];
+    expect(active).toBeTruthy();
+    expect(active).not.toContain("disabled");
+    expect(markup).not.toContain("This account has no access authorization.");
+  });
+  it("user management still disables activation without any proof", () => {
+    authState.user = ownerProvisioned();
+    const markup = renderToStaticMarkup(
+      createElement(UserModal, {
+        account: fixture({ id: "other-test-user", emailVerified: false }),
+        onClose: vi.fn(),
+        onSaved: vi.fn(),
+      })
+    );
+    expect(markup.match(/<option[^>]*value="ACTIVE"[^>]*>/)?.[0]).toContain(
+      'disabled=""'
+    );
+    expect(markup).toContain("This account has no access authorization.");
+  });
+  it.each([false, null])(
+    "normal password login stays enabled with email availability %s",
+    readiness => {
+      authState.emailReady = readiness;
+      const markup = renderToStaticMarkup(
+        createElement(Router, {
+          ssrPath: "/login",
+          children: createElement(AuthPage, { mode: "login" }),
+        })
+      );
+      expect(
+        markup.match(/<button[^>]*type="submit"[^>]*>/)?.[0]
+      ).not.toContain("disabled");
+      expect(markup).not.toContain("Test email setup warning");
+      expect(markup).toContain(
+        "Invited administrators can sign in with their password."
+      );
+    }
+  );
+  it.each(["register", "forgot"] as const)(
+    "retains the email warning and readiness block for %s",
+    mode => {
+      authState.emailReady = false;
+      const markup = renderToStaticMarkup(
+        createElement(Router, {
+          ssrPath: mode === "register" ? "/register" : "/forgot-password",
+          children: createElement(AuthPage, { mode }),
+        })
+      );
+      expect(markup).toContain("Test email setup warning");
+      expect(markup.match(/<button[^>]*type="submit"[^>]*>/)?.[0]).toContain(
+        'disabled=""'
+      );
+    }
+  );
+  it("the setup route is public-to-the-form and has no embedded capability or access gate", () => {
+    const source = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../App.tsx"),
+      "utf8"
+    );
+    const route = source.match(
+      /<Route path="\/admin-setup">[\s\S]*?<\/Route>/
+    )?.[0];
+    expect(route).toContain("<AdminSetupPage />");
+    expect(route).not.toContain("ProtectedPage");
+    expect(route).not.toContain("Gate");
+    const manifest = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../../public/manus-routes.json"),
+      "utf8"
+    );
+    expect(manifest).toContain('"path": "/admin-setup"');
+    expect(manifest).not.toContain("token=");
   });
 });

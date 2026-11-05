@@ -168,7 +168,10 @@ function vitePluginPublicPlatformConfig(): Plugin {
   };
 }
 
-const plugins = [vitePluginPublicPlatformConfig(), react(), tailwindcss(), jsxLocPlugin(), vitePluginManusDebugCollector()];
+// Authentication pages carry private setup capabilities and personal credentials.
+// Do not inject browser replay/debug collection in this CRM in any environment.
+// Host-managed TypeScript diagnostics remain active independently.
+const plugins = [vitePluginPublicPlatformConfig(), react(), tailwindcss(), jsxLocPlugin()];
 
 export default defineConfig({
   plugins,

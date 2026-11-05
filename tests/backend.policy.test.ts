@@ -1,9 +1,11 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { hashPassword, checkPassword, hash, opaque, csrfFor, shouldBootstrap, BOOTSTRAP_EMAILS, requirePermission, validateRoleChange, protectRole, checkOrigin } from "../server/crm/security";
+import { hashPassword, checkPassword, hash, opaque, csrfFor, shouldBootstrap, BOOTSTRAP_EMAILS, accessProof, getUser, requirePermission, validateRoleChange, protectRole, checkOrigin } from "../server/crm/security";
+import * as database from "../server/crm/db";
+import { listUsers } from "../server/crm/services";
 import { setTestMailTransport, emailReady } from "../server/crm/mail";
 import { PERMISSION_CODES, CUSTOMER_TYPES, LEGAL_ENTITY_TYPES, SALUTATIONS, customerSchema, contactSchema, companySchema, registerSchema, type User } from "../shared/crm";
 const base: User = { id: "actor", fullName: "Tester", email: "tester@example.invalid", status: "ACTIVE", emailVerified: true, roles: ["sales", "pricing"], permissions: ["customers.read", "customers.create", "customers.update", "contacts.manage"] };
-afterEach(() => { vi.unstubAllEnvs(); setTestMailTransport(undefined); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); setTestMailTransport(undefined); });
 describe("backend policy and credential isolation", () => {
   it("only bootstraps verified exact allowlist entries once", () => {
     expect([...BOOTSTRAP_EMAILS].sort()).toEqual(["alberto@youcaimedical.com", "eniodeleon87@gmail.com", "eadlr1@gmail.com", "kme2medical@gmail.com", "wangxukai@youcaimedical.com"].sort());
@@ -24,6 +26,30 @@ describe("backend policy and credential isolation", () => {
     expect(() => requirePermission({ ...base, emailVerified: false }, "customers.read")).toThrow(); expect(() => requirePermission({ ...base, permissions: [] }, "customers.read")).toThrow();
     expect(() => requirePermission(base, "customers.read")).not.toThrow(); expect(() => requirePermission(base, "customers.archive")).toThrow();
     expect(() => requirePermission({ ...base, permissions: [...PERMISSION_CODES] }, "roles.manage", true)).toThrow();
+  });
+  it("owner-completed exact proof authorizes access without falsely asserting email verification", () => {
+    for (const email of BOOTSTRAP_EMAILS) {
+      expect(accessProof({ email_normalized: email })).toEqual({ accessAuthorized: false, accessMethod: null });
+      expect(accessProof({ email_normalized: email, owner_authorized_at: "now" })).toEqual({ accessAuthorized: false, accessMethod: null });
+      expect(accessProof({ email_normalized: email, owner_completed_at: "now" })).toEqual({ accessAuthorized: true, accessMethod: "OWNER_PROVISIONED" });
+      expect(() => requirePermission({ ...base, email, emailVerified: false, accessAuthorized: false }, "customers.read")).toThrow();
+    }
+    for (const email of ["outsider@example.invalid", "wangxukai+admin@youcaimedical.com", "wangxukai@youcaimedical.com.attacker.example"]) expect(accessProof({ email_normalized: email, owner_completed_at: "now", accessAuthorized: true })).toEqual({ accessAuthorized: false, accessMethod: null });
+    expect(accessProof({ email_normalized: "ordinary@example.invalid", email_verified_at: "now", owner_completed_at: "now" })).toEqual({ accessAuthorized: true, accessMethod: "EMAIL_VERIFIED" });
+    const owner: User = { ...base, emailVerified: false, accessAuthorized: true, accessMethod: "OWNER_PROVISIONED", roles: ["admin"], permissions: [...PERMISSION_CODES] };
+    expect(() => requirePermission(owner, "roles.manage", true)).not.toThrow();
+    expect(() => requirePermission({ ...owner, status: "SUSPENDED" }, "roles.manage", true)).toThrow();
+  });
+  it("getUser and listUsers compute access from joined database proof rather than supplied DTO claims", async () => {
+    const row = { id: "owner", full_name: "Administrator", email_normalized: "wangxukai@youcaimedical.com", status: "ACTIVE", email_verified_at: null, owner_completed_at: "2026-01-01", created_at: "2026-01-01 00:00:00", accessAuthorized: false };
+    const mock = vi.spyOn(database, "rows");
+    mock.mockResolvedValueOnce([row]).mockResolvedValueOnce([{ code: "admin" }]).mockResolvedValueOnce(PERMISSION_CODES.map(code => ({ code })));
+    expect(await getUser({} as any, row.id)).toMatchObject({ emailVerified: false, accessAuthorized: true, accessMethod: "OWNER_PROVISIONED", permissions: [...PERMISSION_CODES] });
+    mock.mockResolvedValueOnce([row]).mockResolvedValueOnce([{ user_id: row.id, code: "admin" }]).mockResolvedValueOnce(PERMISSION_CODES.map(code => ({ user_id: row.id, code })));
+    expect((await listUsers({} as any))[0]).toMatchObject({ emailVerified: false, accessAuthorized: true, accessMethod: "OWNER_PROVISIONED", permissions: [...PERMISSION_CODES] });
+    mock.mockResolvedValueOnce([{ ...row, owner_completed_at: null, accessAuthorized: true }]).mockResolvedValueOnce([{ code: "admin" }]).mockResolvedValueOnce(PERMISSION_CODES.map(code => ({ code })));
+    expect(await getUser({} as any, row.id)).toMatchObject({ emailVerified: false, accessAuthorized: false, accessMethod: null, permissions: [] });
+    expect(mock.mock.calls.every(([, sql]) => typeof sql === "string")).toBe(true);
   });
   it("forbids self modification, unverified activation and last effective admin loss", () => {
     expect(() => validateRoleChange("a", "a", true, "ACTIVE", ["admin"], 2)).toThrow(); expect(() => validateRoleChange("a", "b", false, "ACTIVE", ["employee"], 2)).toThrow(); expect(() => validateRoleChange("a", "b", true, "ACTIVE", [], 2)).toThrow(); expect(() => validateRoleChange("a", "b", true, "SUSPENDED", [], 0)).toThrow(); expect(() => validateRoleChange("a", "b", true, "ACTIVE", ["sales", "pricing"], 1)).not.toThrow();

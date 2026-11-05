@@ -22,7 +22,8 @@ vi.mock("../server/crm/db", async () => {
 import { crmRouter } from "../server/crm/api";
 import { rows, run } from "../server/crm/db";
 import { setTestMailTransport, type TransactionalMail } from "../server/crm/mail";
-import { hash, opaque, csrfFor, getUser, effectiveAdminCount } from "../server/crm/security";
+import { hash, opaque, csrfFor, getUser, effectiveAdminCount, BOOTSTRAP_EMAILS } from "../server/crm/security";
+import { issueOwnerAdminInvitations, type OwnerAdminInvitation } from "../server/crm/admin-enrollment";
 import { PERMISSION_CODES } from "../shared/crm";
 import { seed } from "../scripts/seed";
 const enabled = !!process.env.DATABASE_URL;
@@ -319,4 +320,270 @@ async function approve(client: Client, roles: string[]) { expect((await request(
     const tables = await rows(connection,"SHOW TABLES"); expect(tables.some(row => String(Object.values(row)[0]).toLowerCase().includes("product"))).toBe(false);
     expect((await request("/auth/logout","POST",undefined,{...technician,csrf:"bad"})).status).toBe(403); const logout=await request("/auth/logout","POST",undefined,technician); expect(logout.status).toBe(200); expect(logout.cookie).toContain("Expires=Thu, 01 Jan 1970"); expect((await request("/auth/me","GET",undefined,technician)).data.user).toBeNull();
   });
+});
+
+// Runs only after the preceding describe has rolled back and closed its pool. These suites must
+// not be concurrent: route savepoints and the global security guard share one test connection.
+(enabled ? describe : describe.skip)("owner-provisioned local administrators rollback integration", () => {
+  let invitations: OwnerAdminInvitation[] = [], owners: Client[] = [];
+  let baseline: number[] = [], effectiveBaseline = 0;
+  const tracked = ["crm_users", "crm_owner_admin_access", "crm_auth_credentials", "crm_auth_tokens", "crm_auth_sessions", "crm_user_roles", "crm_audit_logs", "crm_auth_rate_limits"];
+  const chosenPassword = (index: number) => `Personally chosen owner ${index} password 2026`;
+  const counts = async (db: PoolConnection) => Promise.all(tracked.map(async table => Number((await rows(db, `SELECT COUNT(*) AS total FROM ${table}`))[0].total)));
+  const complete = (invitation: OwnerAdminInvitation, index: number, token = invitation.token) => request("/auth/admin-setup", "POST", { token, fullName: `Rollback Owner Administrator ${index}`, password: chosenPassword(index) });
+  const generic = { message: "This link is invalid or expired" };
+  beforeAll(async () => {
+    actualDb = await vi.importActual<typeof import("../server/crm/db")>("../server/crm/db");
+    connection = await actualDb.getPool().getConnection();
+    // Guard BEFORE any fixtures or mutations; never test against provisioned real identities.
+    const conflict = await rows(connection, `SELECT id FROM crm_users WHERE email_normalized IN (${Array(BOOTSTRAP_EMAILS.size).fill("?").join(",")})`, [...BOOTSTRAP_EMAILS]);
+    if (conflict.length) { connection.release(); throw new Error("Allowlisted identities already exist. Refusing to change real identities; run integration against an isolated copy."); }
+    baseline = await counts(connection);
+    effectiveBaseline = await effectiveAdminCount(connection);
+    await connection.beginTransaction(); state.connection = connection; state.savepoint = 0; state.locks.length = 0;
+    setTestMailTransport(undefined);
+    vi.stubEnv("RESEND_API_KEY", ""); vi.stubEnv("EMAIL_FROM", ""); vi.stubEnv("APP_PUBLIC_URL", "");
+    const app = express(); app.use("/api", crmRouter); server = createServer(app);
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); origin = `http://127.0.0.1:${(server.address() as any).port}`;
+  }, 120000);
+  beforeEach(async () => { await run(connection, "DELETE FROM crm_auth_rate_limits"); state.locks.length = 0; });
+  afterAll(async () => {
+    setTestMailTransport(undefined); vi.unstubAllEnvs(); vi.restoreAllMocks();
+    if (state.connection === connection) {
+      if (server) await new Promise<void>(resolve => server.close(() => resolve()));
+      try { await connection.rollback(); state.connection = null; expect(await counts(connection)).toEqual(baseline); }
+      finally { state.connection = null; connection.release(); }
+    }
+    if (actualDb) await actualDb.closePool();
+  }, 60000);
+  it("refuses public preregistration and credential-bearing identities without owner-pending authorization, atomically", async () => {
+    for (const withCredential of [false, true]) {
+      await connection.query("SAVEPOINT owner_identity_conflict");
+      try {
+        const userId = randomUUID(), email = [...BOOTSTRAP_EMAILS][2];
+        await run(connection, "INSERT INTO crm_users (id,full_name,email_normalized,status) VALUES (?,?,?,'UNVERIFIED')", [userId, "Rollback Public Identity", email]);
+        if (withCredential) await run(connection, "INSERT INTO crm_auth_credentials (user_id,password_hash) VALUES (?,?)", [userId, "not-a-default-credential"]);
+        await expect(issueOwnerAdminInvitations()).rejects.toMatchObject({ status: 409 });
+        expect(await rows(connection, "SELECT user_id FROM crm_owner_admin_access")).toHaveLength(baseline[1]);
+        expect(await rows(connection, "SELECT token_hash FROM crm_auth_tokens WHERE purpose = 'ADMIN_SETUP'")).toEqual([]);
+        expect((await rows(connection, "SELECT id,full_name FROM crm_users WHERE email_normalized = ?", [email]))[0]).toEqual({ id: userId, full_name: "Rollback Public Identity" });
+        expect(await rows(connection, "SELECT role_code FROM crm_user_roles WHERE user_id = ?", [userId])).toEqual([]);
+      } finally { await connection.query("ROLLBACK TO SAVEPOINT owner_identity_conflict"); await connection.query("RELEASE SAVEPOINT owner_identity_conflict"); }
+    }
+  }, 60000);
+  it("issues exactly five private pending capabilities with no mail, credential, session or role and metadata-only config", async () => {
+    const logs = [vi.spyOn(console, "log"), vi.spyOn(console, "info"), vi.spyOn(console, "warn"), vi.spyOn(console, "error")];
+    try {
+      expect((await request("/auth/config")).data).toEqual({ emailReady: false, adminSetupAvailable: true });
+      expect((await request("/auth/register", "POST", { fullName: "Disabled Signup", email: uniqueEmail("disabled"), password, requestedRole: "admin" })).status).toBe(503);
+      invitations = await issueOwnerAdminInvitations();
+      expect(invitations).toHaveLength(5); expect(invitations.map(item => item.email).sort()).toEqual([...BOOTSTRAP_EMAILS].sort());
+      expect(new Set(invitations.map(item => item.userId)).size).toBe(5); expect(new Set(invitations.map(item => item.token)).size).toBe(5);
+      for (const invitation of invitations) {
+        expect(invitation.token).toMatch(/^[A-Za-z0-9_-]{43}$/); expect(new Date(invitation.expiresAt).getTime() - Date.now()).toBeGreaterThan(23 * 3600000);
+        expect(await getUser(connection, invitation.userId)).toMatchObject({ fullName: "Administrator", email: invitation.email, status: "UNVERIFIED", emailVerified: false, accessAuthorized: false, accessMethod: null, roles: [], permissions: [] });
+        expect(await rows(connection, "SELECT user_id FROM crm_auth_credentials WHERE user_id = ?", [invitation.userId])).toEqual([]);
+        const token = (await rows(connection, "SELECT token_hash,purpose,TIMESTAMPDIFF(SECOND,created_at,expires_at) AS seconds FROM crm_auth_tokens WHERE user_id = ?", [invitation.userId]))[0];
+        expect(token.token_hash === hash(invitation.token)).toBe(true); expect(token.purpose).toBe("ADMIN_SETUP"); expect(Number(token.seconds)).toBeGreaterThanOrEqual(86390); expect(Number(token.seconds)).toBeLessThanOrEqual(86410);
+        const check = await request("/auth/admin-setup/check", "POST", { token: invitation.token }); expect(check.status).toBe(200); expect(check.data).toEqual({ email: invitation.email });
+        expect((await request("/auth/login", "POST", { email: invitation.email, password: chosenPassword(0) })).status).toBe(401);
+        const audit = (await rows(connection, "SELECT actor_id,action,metadata FROM crm_audit_logs WHERE entity_id = ?", [invitation.userId]))[0];
+        expect(audit.actor_id).toBeNull(); expect(audit.action).toBe("owner.admin_setup_issued"); expect(JSON.stringify(audit).includes(invitation.token)).toBe(false);
+      }
+      for (const path of ["/customers", "/users", "/company"]) expect((await request(path)).status).toBe(401);
+      expect((await request("/auth/admin-setup/issue", "POST", {})).status).toBe(404);
+      const logged = JSON.stringify(logs.map(log => log.mock.calls));
+      for (const invitation of invitations) expect(logged.includes(invitation.token)).toBe(false);
+    } finally { logs.forEach(log => log.mockRestore()); }
+  }, 120000);
+  it("rolls back pending token rotation and issuance audits when the private handoff fails", async () => {
+    const snapshot = async () => hash(JSON.stringify({
+      counts: await counts(connection),
+      owners: await Promise.all(invitations.map(async invitation => ({
+        user: (await rows(connection, "SELECT * FROM crm_users WHERE id = ?", [invitation.userId]))[0],
+        proof: (await rows(connection, "SELECT * FROM crm_owner_admin_access WHERE user_id = ?", [invitation.userId]))[0],
+        tokens: await rows(connection, "SELECT * FROM crm_auth_tokens WHERE user_id = ? ORDER BY token_hash", [invitation.userId]),
+        audits: (await rows(connection, "SELECT * FROM crm_audit_logs WHERE entity_id = ?", [invitation.userId])).map(row => JSON.stringify(row)).sort(),
+      }))),
+    }));
+    const before = await snapshot();
+    const onPrepared = vi.fn(async () => { throw new Error("Simulated private handoff write failure"); });
+    await expect(issueOwnerAdminInvitations(onPrepared)).rejects.toThrow("Simulated private handoff write failure");
+    expect(onPrepared.mock.calls.length).toBe(1);
+    expect(await snapshot()).toBe(before);
+    for (const invitation of invitations) {
+      const check = await request("/auth/admin-setup/check", "POST", { token: invitation.token });
+      expect(check.status).toBe(200); expect(check.data).toEqual({ email: invitation.email });
+    }
+  }, 60000);
+  it("explicit rerun rotates only pending capabilities, preserves UUIDs and invalidates prior tokens", async () => {
+    const previous = invitations; invitations = await issueOwnerAdminInvitations();
+    expect(invitations.map(item => item.userId)).toEqual(previous.map(item => item.userId));
+    for (let i = 0; i < invitations.length; i++) {
+      expect(invitations[i].token === previous[i].token).toBe(false);
+      expect((await request("/auth/admin-setup/check", "POST", { token: previous[i].token })).status).toBe(400);
+      expect((await request("/auth/admin-setup/check", "POST", { token: invitations[i].token })).status).toBe(200);
+    }
+  }, 60000);
+  it("rejects malformed, outsider, short-password, expired and wrong-purpose capabilities with generic errors", async () => {
+    const invitation = invitations[0];
+    for (const body of [{ token: "bad" }, { token: opaque() }, { token: invitation.token, email: invitation.email }]) {
+      const response = await request("/auth/admin-setup/check", "POST", body); expect(response.status).toBe(400); expect(response.data).toEqual(generic);
+    }
+    for (const body of [
+      { token: invitation.token }, { token: invitation.token, fullName: "Name", password: "x".repeat(11) },
+      { token: invitation.token, fullName: "Name", password: "x".repeat(129) },
+      { token: invitation.token, fullName: "x", password }, { token: invitation.token, fullName: "x".repeat(161), password },
+      { token: invitation.token, fullName: "Name", password, roles: ["admin"] },
+      { token: opaque(), fullName: "Name", password },
+    ]) { const response = await request("/auth/admin-setup", "POST", body); expect(response.status).toBe(400); expect(response.data).toEqual(generic); }
+    await connection.query("SAVEPOINT owner_capability_guards");
+    try {
+      await run(connection, "UPDATE crm_auth_tokens SET expires_at = ? WHERE token_hash = ?", [new Date(Date.now() - 1000), hash(invitation.token)]);
+      for (const path of ["/auth/admin-setup/check", "/auth/admin-setup"]) {
+        const response = await request(path, "POST", path.endsWith("check") ? { token: invitation.token } : { token: invitation.token, fullName: "Name", password }); expect(response.status).toBe(400); expect(response.data).toEqual(generic);
+      }
+      await run(connection, "UPDATE crm_auth_tokens SET expires_at = ?, purpose = 'RESET' WHERE token_hash = ?", [new Date(Date.now() + 3600000), hash(invitation.token)]);
+      expect((await request("/auth/admin-setup/check", "POST", { token: invitation.token })).status).toBe(400);
+      expect((await complete(invitation, 0)).status).toBe(400);
+      await run(connection, "DELETE FROM crm_auth_rate_limits");
+      await run(connection, "UPDATE crm_auth_tokens SET purpose = 'ADMIN_SETUP' WHERE token_hash = ?", [hash(invitation.token)]);
+      await run(connection, "UPDATE crm_users SET email_normalized = ? WHERE id = ?", [uniqueEmail("outsider"), invitation.userId]);
+      expect((await request("/auth/admin-setup/check", "POST", { token: invitation.token })).status).toBe(400); expect((await complete(invitation, 0)).status).toBe(400);
+    } finally { await connection.query("ROLLBACK TO SAVEPOINT owner_capability_guards"); await connection.query("RELEASE SAVEPOINT owner_capability_guards"); }
+    expect(await rows(connection, "SELECT user_id FROM crm_auth_credentials WHERE user_id = ?", [invitation.userId])).toEqual([]);
+    expect(await getUser(connection, invitation.userId)).toMatchObject({ status: "UNVERIFIED", emailVerified: false, accessAuthorized: false, roles: [] });
+  }, 120000);
+  it("requires pending owner authorization and pristine identity despite a genuine setup token", async () => {
+    const invitation = invitations[0];
+    for (const mutation of [
+      "DELETE FROM crm_owner_admin_access WHERE user_id = ?",
+      "UPDATE crm_owner_admin_access SET completed_at = UTC_TIMESTAMP(3) WHERE user_id = ?",
+      "UPDATE crm_users SET status = 'SUSPENDED' WHERE id = ?",
+      "UPDATE crm_users SET status = 'REJECTED' WHERE id = ?",
+      "UPDATE crm_users SET status = 'PENDING_APPROVAL' WHERE id = ?",
+      "UPDATE crm_users SET bootstrap_completed = TRUE WHERE id = ?",
+      "UPDATE crm_users SET email_verified_at = UTC_TIMESTAMP(3) WHERE id = ?",
+      "INSERT INTO crm_auth_credentials (user_id,password_hash) VALUES (?,'not-a-default-credential')",
+      "INSERT INTO crm_user_roles (user_id,role_code) VALUES (?,'employee')",
+    ]) {
+      await connection.query("SAVEPOINT owner_identity_guard");
+      try {
+        await run(connection, mutation, [invitation.userId]);
+        const check = await request("/auth/admin-setup/check", "POST", { token: invitation.token }); expect(check.status).toBe(400); expect(check.data).toEqual(generic);
+        const result = await complete(invitation, 0); expect(result.status).toBe(400); expect(result.data).toEqual(generic);
+      } finally { await connection.query("ROLLBACK TO SAVEPOINT owner_identity_guard"); await connection.query("RELEASE SAVEPOINT owner_identity_guard"); }
+    }
+  }, 120000);
+  it("completes all five with individual salted passwords, truthful owner access and no automatic session", async () => {
+    const credentials: string[] = [], secrets: string[] = [];
+    for (let index = 0; index < invitations.length; index++) {
+      const invitation = invitations[index], staleSession = opaque(), staleVerify = opaque();
+      // Completion cleans up any imported/stale sessions and all token purposes.
+      await run(connection, "INSERT INTO crm_auth_sessions (token_hash,user_id,csrf_hash,expires_at) VALUES (?,?,?,?)", [hash(staleSession), invitation.userId, hash(csrfFor(staleSession)), new Date(Date.now() + 3600000)]);
+      await run(connection, "INSERT INTO crm_auth_tokens (token_hash,user_id,purpose,expires_at) VALUES (?,?,'VERIFY',?)", [hash(staleVerify), invitation.userId, new Date(Date.now() + 3600000)]);
+      state.locks.length = 0;
+      const result = await complete(invitation, index); expect(result.status).toBe(200); expect(result.cookie).toBeNull();
+      const locks = state.locks.filter(sql => /crm_security_guard|crm_users|crm_auth_tokens/.test(sql));
+      expect(locks).toHaveLength(3); expect(locks[0]).toContain("crm_security_guard"); expect(locks[1]).toContain("crm_users"); expect(locks[2]).toContain("crm_auth_tokens");
+      expect(await getUser(connection, invitation.userId)).toMatchObject({ fullName: `Rollback Owner Administrator ${index}`, email: invitation.email, status: "ACTIVE", emailVerified: false, accessAuthorized: true, accessMethod: "OWNER_PROVISIONED", roles: ["admin"], permissions: [...PERMISSION_CODES].sort() });
+      const marker = (await rows(connection, "SELECT u.email_verified_at,u.bootstrap_completed,u.updated_by,oa.authorized_at,oa.completed_at FROM crm_users u JOIN crm_owner_admin_access oa ON oa.user_id = u.id WHERE u.id = ?", [invitation.userId]))[0];
+      expect(marker.email_verified_at).toBeNull(); expect(Number(marker.bootstrap_completed)).toBe(1); expect(marker.updated_by).toBe(invitation.userId); expect(marker.authorized_at).not.toBeNull(); expect(marker.completed_at).not.toBeNull();
+      expect(await rows(connection, "SELECT token_hash FROM crm_auth_tokens WHERE user_id = ?", [invitation.userId])).toEqual([]);
+      expect(await rows(connection, "SELECT token_hash FROM crm_auth_sessions WHERE user_id = ?", [invitation.userId])).toEqual([]);
+      const credential = (await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [invitation.userId]))[0].password_hash;
+      expect(credential).toMatch(/^scrypt\$32768\$8\$1\$/); expect(credential.includes(chosenPassword(index))).toBe(false); credentials.push(credential);
+      expect((await request("/auth/login", "POST", { email: invitation.email, password })).status).toBe(401);
+      const login = await request("/auth/login", "POST", { email: invitation.email, password: chosenPassword(index) }); expect(login.status).toBe(200);
+      expect(login.data.user).toMatchObject({ emailVerified: false, accessAuthorized: true, accessMethod: "OWNER_PROVISIONED", roles: ["admin"], permissions: [...PERMISSION_CODES].sort() });
+      const owner = { userId: invitation.userId, cookie: login.cookie!.split(";")[0], csrf: login.data.csrfToken }; owners.push(owner);
+      for (const path of ["/customers", "/users", "/company", "/roles", "/audit"]) expect((await request(path, "GET", undefined, owner)).status).toBe(200);
+      const listed = (await request("/users", "GET", undefined, owner)).data.items.find((user: any) => user.id === owner.userId); expect(listed).toMatchObject({ emailVerified: false, accessAuthorized: true, accessMethod: "OWNER_PROVISIONED", permissions: [...PERMISSION_CODES].sort() });
+      expect((await request("/auth/admin-setup/check", "POST", { token: invitation.token })).status).toBe(400);
+      expect((await complete(invitation, index + 10)).status).toBe(400);
+      expect((await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [invitation.userId]))[0].password_hash === credential).toBe(true);
+      expect(await rows(connection, "SELECT role_code FROM crm_user_roles WHERE user_id = ?", [invitation.userId])).toEqual([{ role_code: "admin" }]);
+      expect(await rows(connection, "SELECT action FROM crm_audit_logs WHERE entity_id = ? AND action = 'owner.admin_setup_completed'", [invitation.userId])).toHaveLength(1);
+      secrets.push(invitation.token, staleSession, staleVerify, chosenPassword(index), credential);
+    }
+    expect(new Set(credentials).size).toBe(5); expect(new Set(credentials.map(encoded => encoded.split("$")[4])).size).toBe(5);
+    expect(await effectiveAdminCount(connection)).toBe(effectiveBaseline + 5);
+    const serialized = JSON.stringify(await rows(connection, "SELECT action,metadata FROM crm_audit_logs")); for (const secret of secrets) expect(serialized.includes(secret)).toBe(false);
+    const before = await counts(connection); expect(await issueOwnerAdminInvitations()).toEqual([]); expect(await counts(connection)).toEqual(before);
+  }, 180000);
+  it("ordinary unverified/pending identities and public signup do not receive owner access or automatic roles", async () => {
+    const localMail: TransactionalMail[] = []; setTestMailTransport(async message => { localMail.push(message); });
+    await connection.query("SAVEPOINT owner_public_signup");
+    try {
+      for (const [index, verify] of [false, true].entries()) {
+        const email = uniqueEmail(verify ? "owner-suite-pending" : "owner-suite-unverified");
+        expect((await request("/auth/register", "POST", { fullName: "Ordinary Public Signup", email, password, requestedRole: "admin" })).status).toBe(200);
+        const userId = (await rows(connection, "SELECT id FROM crm_users WHERE email_normalized = ?", [email]))[0].id;
+        if (verify) {
+          const link = localMail[index].text.match(/https:\/\/[^\s]+/)![0], token = new URL(link).searchParams.get("token")!;
+          expect((await request("/auth/verify", "POST", { token, password })).status).toBe(200);
+        }
+        expect(await getUser(connection, userId)).toMatchObject({ status: verify ? "PENDING_APPROVAL" : "UNVERIFIED", emailVerified: verify, accessAuthorized: verify, accessMethod: verify ? "EMAIL_VERIFIED" : null, roles: [], permissions: [] });
+        expect(await rows(connection, "SELECT user_id FROM crm_owner_admin_access WHERE user_id = ?", [userId])).toEqual([]);
+        const login = await request("/auth/login", "POST", { email, password }); expect(login.status).toBe(200);
+        const client = { userId, cookie: login.cookie!.split(";")[0], csrf: login.data.csrfToken };
+        for (const path of ["/customers", "/users", "/company"]) expect((await request(path, "GET", undefined, client)).status).toBe(403);
+        if (!verify) expect((await request(`/users/${userId}`, "PUT", { status: "ACTIVE", roles: ["admin"] }, owners[0])).status).toBe(409);
+      }
+      const invitation = invitations[0], before = await getUser(connection, invitation.userId);
+      expect((await request("/auth/register", "POST", { fullName: "Public Impersonator", email: invitation.email, password, requestedRole: "admin" })).status).toBe(200);
+      expect(await getUser(connection, invitation.userId)).toEqual(before);
+    } finally { setTestMailTransport(undefined); await connection.query("ROLLBACK TO SAVEPOINT owner_public_signup"); await connection.query("RELEASE SAVEPOINT owner_public_signup"); }
+  }, 120000);
+  it("demotion and suspension remain effective in existing sessions; replay and owner reruns cannot restore admin", async () => {
+    await connection.query("SAVEPOINT owner_revocation");
+    try {
+      expect((await request(`/users/${owners[1].userId}`, "PUT", { status: "ACTIVE", roles: ["sales"] }, owners[0])).status).toBe(200);
+      expect((await request(`/users/${owners[2].userId}`, "PUT", { status: "SUSPENDED", roles: ["admin"] }, owners[0])).status).toBe(200);
+      expect((await request("/users", "GET", undefined, owners[1])).status).toBe(403); expect((await request("/customers", "GET", undefined, owners[2])).status).toBe(403);
+      const snapshots = await Promise.all(invitations.map(async item => ({ user: await getUser(connection, item.userId), credential: (await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [item.userId]))[0].password_hash, proof: (await rows(connection, "SELECT * FROM crm_owner_admin_access WHERE user_id = ?", [item.userId]))[0] })));
+      const before = await counts(connection); expect(await issueOwnerAdminInvitations()).toEqual([]); expect(await counts(connection)).toEqual(before);
+      for (const index of [1, 2]) {
+        expect((await complete(invitations[index], index + 10)).status).toBe(400);
+        expect(await getUser(connection, invitations[index].userId)).toEqual(snapshots[index].user);
+        expect((await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [invitations[index].userId]))[0].password_hash === snapshots[index].credential).toBe(true);
+        expect((await rows(connection, "SELECT * FROM crm_owner_admin_access WHERE user_id = ?", [invitations[index].userId]))[0]).toEqual(snapshots[index].proof);
+        expect(await rows(connection, "SELECT action FROM crm_audit_logs WHERE entity_id = ? AND action = 'owner.admin_setup_completed'", [invitations[index].userId])).toHaveLength(1);
+      }
+      expect(await effectiveAdminCount(connection)).toBe(effectiveBaseline + 3);
+      // Genuine replay and a stale imported ADMIN_SETUP token both fail after durable completion.
+      const stale = opaque(); await run(connection, "INSERT INTO crm_auth_tokens (token_hash,user_id,purpose,expires_at) VALUES (?,?,'ADMIN_SETUP',?)", [hash(stale), invitations[1].userId, new Date(Date.now() + 3600000)]);
+      expect((await complete(invitations[1], 1, stale)).status).toBe(400);
+      expect((await request("/auth/admin-setup/check", "POST", { token: stale })).status).toBe(400);
+    } finally { await connection.query("ROLLBACK TO SAVEPOINT owner_revocation"); await connection.query("RELEASE SAVEPOINT owner_revocation"); }
+  }, 120000);
+  it("protects the last effective owner admin, self changes and core permissions with rollback", async () => {
+    await connection.query("SAVEPOINT owner_last_admin");
+    try {
+      for (const owner of owners.slice(1)) expect((await request(`/users/${owner.userId}`, "PUT", { status: "SUSPENDED", roles: [] }, owners[0])).status).toBe(200);
+      // Existing unrelated admins, if any, are not fixtures and are never mutated; test last-admin
+      // only when the guarded database has no effective nonfixture administrator.
+      if (effectiveBaseline === 0) {
+        expect(await effectiveAdminCount(connection)).toBe(1);
+        const actorId = randomUUID(), session = opaque();
+        await run(connection, "INSERT INTO crm_users (id,full_name,email_normalized,status,email_verified_at) VALUES (?,?,?,'ACTIVE',UTC_TIMESTAMP(3))", [actorId, "Rollback Incomplete CEO", uniqueEmail("owner-last-actor")]);
+        await run(connection, "INSERT INTO crm_user_roles (user_id,role_code) VALUES (?,'ceo')", [actorId]);
+        await run(connection, "DELETE FROM crm_role_permissions WHERE role_code = 'ceo' AND permission_code = 'customers.archive'");
+        await run(connection, "INSERT INTO crm_auth_sessions (token_hash,user_id,csrf_hash,expires_at) VALUES (?,?,?,?)", [hash(session), actorId, hash(csrfFor(session)), new Date(Date.now() + 3600000)]);
+        const malformed = { userId: actorId, cookie: `youcai_session=${session}`, csrf: csrfFor(session) };
+        expect((await request(`/users/${owners[0].userId}`, "PUT", { status: "SUSPENDED", roles: [] }, malformed)).status).toBe(409);
+        expect(await getUser(connection, owners[0].userId)).toMatchObject({ status: "ACTIVE", emailVerified: false, accessAuthorized: true, roles: ["admin"] });
+        expect(await effectiveAdminCount(connection)).toBe(1);
+      }
+      expect((await request(`/users/${owners[0].userId}`, "PUT", { status: "SUSPENDED", roles: [] }, owners[0])).status).toBe(409);
+      expect((await request("/roles/admin", "PUT", { permissions: [] }, owners[0])).status).toBe(409);
+    } finally { await connection.query("ROLLBACK TO SAVEPOINT owner_last_admin"); await connection.query("RELEASE SAVEPOINT owner_last_admin"); }
+  }, 120000);
+  it("rate limits both capability check and completion without leaking a token or user identity", async () => {
+    for (const path of ["/auth/admin-setup/check", "/auth/admin-setup"]) {
+      let response: Awaited<ReturnType<typeof request>> | undefined;
+      for (let attempt = 0; attempt < 13; attempt++) response = await request(path, "POST", { token: opaque() });
+      expect(response?.status).toBe(429); expect(response?.data).toEqual({ message: "Too many attempts. Please try again later" });
+    }
+  }, 60000);
 });

@@ -14,22 +14,27 @@ export async function checkPassword(password: string, encoded: string): Promise<
 export const BOOTSTRAP_EMAILS = new Set(["alberto@youcaimedical.com", "eniodeleon87@gmail.com", "eadlr1@gmail.com", "kme2medical@gmail.com", "wangxukai@youcaimedical.com"]);
 export const shouldBootstrap = (email: string, emailVerified: boolean, alreadyCompleted = false): boolean => emailVerified && !alreadyCompleted && BOOTSTRAP_EMAILS.has(email.trim().toLowerCase());
 export const isTopLevel = (user: User): boolean => user.roles.includes("admin") || user.roles.includes("ceo");
-export function requireActive(user: User | null): asserts user is User { if (!user) throw new HttpError(401, "Sign in is required"); if (user.status !== "ACTIVE" || !user.emailVerified) throw new HttpError(403, "Your account is not active"); }
+export function accessProof(row: Record<string, any>): Pick<User, "accessAuthorized" | "accessMethod"> {
+  if (row.email_verified_at) return { accessAuthorized: true, accessMethod: "EMAIL_VERIFIED" };
+  if (row.owner_completed_at && BOOTSTRAP_EMAILS.has(row.email_normalized)) return { accessAuthorized: true, accessMethod: "OWNER_PROVISIONED" };
+  return { accessAuthorized: false, accessMethod: null };
+}
+export function requireActive(user: User | null): asserts user is User { if (!user) throw new HttpError(401, "Sign in is required"); if (user.status !== "ACTIVE" || !(user.accessAuthorized === true || user.emailVerified)) throw new HttpError(403, "Your account is not active"); }
 export function requirePermission(user: User | null, permission?: string, topLevel = false): asserts user is User { requireActive(user); if ((permission && !user.permissions.includes(permission)) || (topLevel && !isTopLevel(user))) throw new HttpError(403, "You do not have permission for this action"); }
-export function validateRoleChange(actorId: string, targetId: string, verified: boolean, status: string, roles: string[], activeAdminsAfter: number): void {
+export function validateRoleChange(actorId: string, targetId: string, authorized: boolean, status: string, roles: string[], activeAdminsAfter: number): void {
   if (actorId === targetId) throw new HttpError(409, "You cannot change your own roles or status");
-  if (status === "ACTIVE" && !verified) throw new HttpError(409, "Email verification is required before approval");
+  if (status === "ACTIVE" && !authorized) throw new HttpError(409, "Access authorization is required before approval");
   if (status === "ACTIVE" && !roles.length) throw new HttpError(422, "An active user requires at least one role");
   if (activeAdminsAfter < 1) throw new HttpError(409, "At least one effective active administrator must remain");
 }
 export function protectRole(code: string, permissions: string[]): void { if (["admin", "ceo"].includes(code) && PERMISSION_CODES.some(p => !permissions.includes(p))) throw new HttpError(409, "Core Admin and CEO permissions cannot be removed"); }
 export async function getUser(db: Db, id: string): Promise<User | null> {
-  const row = (await rows(db, "SELECT u.*, rr.role_code AS requested_role FROM crm_users u LEFT JOIN crm_role_requests rr ON rr.user_id = u.id WHERE u.id = ?", [id]))[0];
+  const row = (await rows(db, "SELECT u.*, rr.role_code AS requested_role, oa.completed_at AS owner_completed_at FROM crm_users u LEFT JOIN crm_role_requests rr ON rr.user_id = u.id LEFT JOIN crm_owner_admin_access oa ON oa.user_id = u.id WHERE u.id = ?", [id]))[0];
   if (!row) return null;
   const roleRows = await rows(db, "SELECT r.code FROM crm_user_roles ur JOIN crm_roles r ON r.code = ur.role_code AND r.active = TRUE WHERE ur.user_id = ? ORDER BY r.code", [id]);
   const permissionRows = await rows(db, "SELECT DISTINCT p.code FROM crm_user_roles ur JOIN crm_roles r ON r.code = ur.role_code AND r.active = TRUE JOIN crm_role_permissions rp ON rp.role_code = r.code JOIN crm_permissions p ON p.code = rp.permission_code AND p.active = TRUE WHERE ur.user_id = ? ORDER BY p.code", [id]);
-  const active = row.status === "ACTIVE" && !!row.email_verified_at;
-  return { id: row.id, fullName: row.full_name, email: row.email_normalized, status: row.status, emailVerified: !!row.email_verified_at, roles: roleRows.map(v => v.code), permissions: active ? permissionRows.map(v => v.code) : [], requestedRole: row.requested_role ?? null, createdAt: iso(row.created_at) };
+  const proof = accessProof(row), active = row.status === "ACTIVE" && proof.accessAuthorized;
+  return { id: row.id, fullName: row.full_name, email: row.email_normalized, status: row.status, emailVerified: !!row.email_verified_at, ...proof, roles: roleRows.map(v => v.code), permissions: active ? permissionRows.map(v => v.code) : [], requestedRole: row.requested_role ?? null, createdAt: iso(row.created_at) };
 }
 export interface AuthContext { user: User; sessionHash: string; csrfToken: string; csrfHash: string; }
 export function sessionCookie(req: Request): string | null { const cookies = req.headers.cookie?.split(";") ?? []; for (const part of cookies) { const [key, ...values] = part.trim().split("="); if (key === "youcai_session") { const value = values.join("="); return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : null; } } return null; }
@@ -42,7 +47,7 @@ export async function resolveSession(req: Request, db: Db = getPool()): Promise<
 }
 export async function audit(db: Db, actorId: string | null, action: string, entityType: string, entityId: string | null, metadata: Record<string, unknown> = {}): Promise<void> { await run(db, "INSERT INTO crm_audit_logs (id, actor_id, action, entity_type, entity_id, metadata) VALUES (?, ?, ?, ?, ?, ?)", [randomUUID(), actorId, action, entityType, entityId, JSON.stringify(metadata)]); }
 export async function lockSecurity(db: Db): Promise<void> { await rows(db, "SELECT id FROM crm_security_guard WHERE id = 1 FOR UPDATE"); }
-export async function effectiveAdminCount(db: Db): Promise<number> { const candidates = await rows(db, "SELECT DISTINCT u.id FROM crm_users u JOIN crm_user_roles ur ON ur.user_id = u.id JOIN crm_roles r ON r.code = ur.role_code AND r.active = TRUE WHERE u.status = 'ACTIVE' AND u.email_verified_at IS NOT NULL AND r.code IN ('admin', 'ceo')"); let count = 0; for (const candidate of candidates) { const user = await getUser(db, candidate.id); if (user && PERMISSION_CODES.every(p => user.permissions.includes(p))) count++; } return count; }
+export async function effectiveAdminCount(db: Db): Promise<number> { const candidates = await rows(db, "SELECT DISTINCT u.id FROM crm_users u JOIN crm_user_roles ur ON ur.user_id = u.id JOIN crm_roles r ON r.code = ur.role_code AND r.active = TRUE LEFT JOIN crm_owner_admin_access oa ON oa.user_id = u.id WHERE u.status = 'ACTIVE' AND (u.email_verified_at IS NOT NULL OR oa.completed_at IS NOT NULL) AND r.code IN ('admin', 'ceo')"); let count = 0; for (const candidate of candidates) { const user = await getUser(db, candidate.id); if (user?.accessAuthorized && PERMISSION_CODES.every(p => user.permissions.includes(p))) count++; } return count; }
 export async function limitAuth(req: Request, operation: string, email?: string): Promise<void> {
   // Hash addresses and IPs; trust proxy configuration belongs to the deployment, never parse client XFF here.
   const buckets = [{ key: `${operation}:ip:${req.ip || req.socket.remoteAddress || "unknown"}`, max: operation === "login" ? 30 : 12 }];

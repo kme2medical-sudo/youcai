@@ -3,6 +3,7 @@ import { Toaster } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { AuthProvider, Gate } from "./crm/session";
 import { AuthPage } from "./crm/auth";
+import { AdminSetupPage } from "./crm/admin-setup";
 import { Layout } from "./crm/layout";
 import { Dashboard, Profile } from "./crm/dashboard";
 import { Customers, CustomerEditor } from "./crm/customers";
@@ -36,6 +37,7 @@ function Router() {
     <Switch>
       <Route path="/login">{() => <AuthPage mode="login" />}</Route>
       <Route path="/register">{() => <AuthPage mode="register" />}</Route>
+      <Route path="/admin-setup">{() => <AdminSetupPage />}</Route>
       <Route path="/verify-email">{() => <AuthPage mode="verify" />}</Route>
       <Route path="/forgot-password">{() => <AuthPage mode="forgot" />}</Route>
       <Route path="/reset-password">{() => <AuthPage mode="reset" />}</Route>

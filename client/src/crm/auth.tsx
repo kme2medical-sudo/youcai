@@ -46,7 +46,7 @@ const copy: Record<
     eyebrow: "YOUR CRM WORKSPACE",
     title: "Good to have you back.",
     description:
-      "Sign in to manage the relationships that move your business forward.",
+      "Sign in to manage the relationships that move your business forward. Invited administrators can sign in with their password.",
   },
   register: {
     eyebrow: "JOIN THE WORKSPACE",
@@ -195,7 +195,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
             ? "Confirm your email and secure your account. Choose the password you will use to sign in; this replaces any password entered before verification."
             : cfg.description}
         </p>
-        <EmailSetupBanner />
+        {mode !== "login" && <EmailSetupBanner />}
         {auth.error && (
           <Notice tone="warning">
             The current session could not be checked. You can still try signing
@@ -223,9 +223,9 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
           <div className="auth-success-actions">
             {mode === "register" && (
               <p>
-                Verify your email and confirm your personal password. Authorized
-                initial administrators are activated automatically; other accounts
-                wait for Admin or CEO approval. A requested role alone grants no access.
+                Verify your email and confirm your personal password, then wait
+                for Admin or CEO approval. A requested role alone grants no
+                access.
               </p>
             )}
             <Link href="/login" className="btn btn-primary">
@@ -330,7 +330,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               <Field
                 label="Requested role"
                 required
-                hint="A request only, not a grant. Verified initial administrators are assigned Admin automatically."
+                hint="A request only, not a grant. An Admin or CEO reviews your request."
               >
                 <select
                   required
@@ -355,8 +355,8 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               <div className="auth-approval-note">
                 <ShieldCheck size={18} />
                 <span>
-                  Email verification is required. Authorized initial administrators
-                  become active automatically; all other accounts need approval.
+                  Access requests require email verification and Admin or CEO
+                  approval before business modules become available.
                 </span>
               </div>
             )}
@@ -412,18 +412,18 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         )}
         <div className="auth-secure">
           <LockKeyhole size={13} />
-          Application-owned sign-in · Approval-based access
+          Application-owned sign-in · Controlled access
         </div>
       </div>
     </AuthShell>
   );
 }
-function AuthShell({
+export function AuthShell({
   children,
   mode,
 }: {
   children: ReactNode;
-  mode: AuthMode;
+  mode: AuthMode | "admin-setup";
 }) {
   return (
     <div className={`auth-shell auth-${mode}`}>
@@ -459,7 +459,9 @@ function AuthShell({
               </span>
               <section>
                 <h3>The right access, for every role</h3>
-                <p>Verified accounts. Approved access. Clear accountability.</p>
+                <p>
+                  Authorized accounts. Controlled access. Clear accountability.
+                </p>
               </section>
             </div>
           </div>

@@ -1,5 +1,6 @@
 # Register and sign in as the first Youcai administrator
 
+> **Superseded for the five initial administrators:** the owner subsequently canceled Firebase and authorized private personal-password setup followed by direct local login without email verification. Read [administrator direct login](administrator-direct-login.md) for the current path. This document preserves the earlier email-provider investigation/instructions; it still applies to ordinary email onboarding where relevant.
 ## Application and current readiness
 
 Published application: **https://youcai-usq7zhae.manus.space**. Registration page: **https://youcai-usq7zhae.manus.space/register**. CRM sign-in: **https://youcai-usq7zhae.manus.space/login**.

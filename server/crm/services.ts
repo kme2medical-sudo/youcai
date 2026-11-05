@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Customer, Contact, Company, CustomerInput, ContactInput, CompanyInput, User } from "../../shared/crm";
 import { type Db, getPool, rows, run, transaction, iso } from "./db";
-import { HttpError, audit, getUser, requirePermission, lockSecurity, effectiveAdminCount, validateRoleChange, protectRole } from "./security";
+import { HttpError, audit, getUser, accessProof, requirePermission, lockSecurity, effectiveAdminCount, validateRoleChange, protectRole } from "./security";
 const customerFields = { displayName: "display_name", legalName: "legal_name", customerType: "customer_type", legalEntityType: "legal_entity_type", countryCode: "country_code", email: "email", phone: "phone", website: "website", taxId: "tax_id", addressLine1: "address_line1", addressLine2: "address_line2", city: "city", state: "state", postalCode: "postal_code", notes: "notes" } as const;
 const contactFields = { salutation: "salutation", fullName: "full_name", alias: "alias", jobTitle: "job_title", phone: "phone", email: "email", isPrimary: "is_primary" } as const;
 const companyFields = { tradingName: "trading_name", legalName: "legal_name", logoUrl: "logo_url", website: "website", email: "email", phone: "phone", countryCode: "country_code", addressLine1: "address_line1", city: "city", state: "state", postalCode: "postal_code", timezone: "timezone", defaultCurrency: "default_currency", description: "description" } as const;
@@ -91,13 +91,13 @@ export async function saveCompany(actorId: string, input: CompanyInput) {
   });
 }
 export async function listUsers(db: Db): Promise<User[]> {
-  const users = await rows(db, "SELECT u.*, rr.role_code AS requested_role FROM crm_users u LEFT JOIN crm_role_requests rr ON rr.user_id = u.id ORDER BY u.created_at DESC, u.id DESC");
+  const users = await rows(db, "SELECT u.*, rr.role_code AS requested_role, oa.completed_at AS owner_completed_at FROM crm_users u LEFT JOIN crm_role_requests rr ON rr.user_id = u.id LEFT JOIN crm_owner_admin_access oa ON oa.user_id = u.id ORDER BY u.created_at DESC, u.id DESC");
   const assignments = await rows(db, "SELECT ur.user_id, r.code FROM crm_user_roles ur JOIN crm_roles r ON r.code = ur.role_code AND r.active = TRUE ORDER BY r.code");
   const effective = await rows(db, "SELECT DISTINCT ur.user_id, p.code FROM crm_user_roles ur JOIN crm_roles r ON r.code = ur.role_code AND r.active = TRUE JOIN crm_role_permissions rp ON rp.role_code = r.code JOIN crm_permissions p ON p.code = rp.permission_code AND p.active = TRUE ORDER BY p.code");
   const roleMap = new Map<string, string[]>(), permissionMap = new Map<string, string[]>();
   for (const row of assignments) roleMap.set(row.user_id, [...(roleMap.get(row.user_id) || []), row.code]);
   for (const row of effective) permissionMap.set(row.user_id, [...(permissionMap.get(row.user_id) || []), row.code]);
-  return users.map(row => ({ id: row.id, fullName: row.full_name, email: row.email_normalized, status: row.status, emailVerified: !!row.email_verified_at, roles: roleMap.get(row.id) || [], permissions: row.status === "ACTIVE" && row.email_verified_at ? permissionMap.get(row.id) || [] : [], requestedRole: row.requested_role || null, createdAt: iso(row.created_at) }));
+  return users.map(row => { const proof = accessProof(row); return { id: row.id, fullName: row.full_name, email: row.email_normalized, status: row.status, emailVerified: !!row.email_verified_at, ...proof, roles: roleMap.get(row.id) || [], permissions: row.status === "ACTIVE" && proof.accessAuthorized ? permissionMap.get(row.id) || [] : [], requestedRole: row.requested_role || null, createdAt: iso(row.created_at) }; });
 }
 export async function updateUser(actorId: string, targetId: string, input: { status: string; roles: string[] }) {
   return transaction(async db => {
@@ -105,14 +105,14 @@ export async function updateUser(actorId: string, targetId: string, input: { sta
     const target = await getUser(db, targetId); if (!target) throw new HttpError(404, "User not found");
     const approval = ["UNVERIFIED", "PENDING_APPROVAL"].includes(target.status) && ["ACTIVE", "REJECTED", "PENDING_APPROVAL"].includes(input.status);
     requirePermission(await getUser(db, actorId), approval ? "users.approve" : "users.manage", true);
-    validateRoleChange(actorId, targetId, target.emailVerified, input.status, input.roles, 1);
+    validateRoleChange(actorId, targetId, target.accessAuthorized === true || target.emailVerified, input.status, input.roles, 1);
     await rows(db, "SELECT id FROM crm_users WHERE id = ? FOR UPDATE", [targetId]);
     const activeRoles = await rows(db, "SELECT code FROM crm_roles WHERE active = TRUE"); if (input.roles.some(code => !activeRoles.some(r => r.code === code))) throw new HttpError(422, "Choose active system roles");
     await run(db, "DELETE FROM crm_user_roles WHERE user_id = ?", [targetId]);
     for (const role of input.roles) await run(db, "INSERT INTO crm_user_roles (user_id, role_code, assigned_by) VALUES (?, ?, ?)", [targetId, role, actorId]);
     await run(db, "UPDATE crm_users SET status = ?, updated_by = ?, updated_at = UTC_TIMESTAMP(3) WHERE id = ?", [input.status, actorId, targetId]);
     await run(db, "UPDATE crm_role_requests SET reviewed_at = UTC_TIMESTAMP(3), reviewed_by = ? WHERE user_id = ?", [actorId, targetId]);
-    validateRoleChange(actorId, targetId, target.emailVerified, input.status, input.roles, await effectiveAdminCount(db));
+    validateRoleChange(actorId, targetId, target.accessAuthorized === true || target.emailVerified, input.status, input.roles, await effectiveAdminCount(db));
     await audit(db, actorId, approval ? "user.approval_changed" : "user.roles_status_changed", "user", targetId, { before: { status: target.status, roles: target.roles }, after: input });
     return { status: input.status, roles: input.roles };
   });

@@ -26,8 +26,25 @@ export type AuditEntry = {
 export function roleName(code: string) {
   return ROLES.find(r => r.code === code)?.name ?? code;
 }
+export function hasAccessProof(user: User | null | undefined) {
+  return !!user && (user.emailVerified || user.accessAuthorized === true);
+}
+export function isOwnerProvisioned(user: User | null | undefined) {
+  return (
+    !!user &&
+    user.accessAuthorized === true &&
+    user.accessMethod === "OWNER_PROVISIONED"
+  );
+}
+export function accessMethodLabel(user: User) {
+  if (isOwnerProvisioned(user)) return "Owner-provisioned";
+  if (user.emailVerified) return "Email verified";
+  return user.accessAuthorized === true
+    ? "Access authorized"
+    : "Not authorized";
+}
 export function isActive(user: User | null | undefined) {
-  return !!user && user.status === "ACTIVE" && user.emailVerified;
+  return !!user && user.status === "ACTIVE" && hasAccessProof(user);
 }
 export function isLeadership(user: User | null | undefined) {
   return !!user && user.roles.some(r => r === "admin" || r === "ceo");

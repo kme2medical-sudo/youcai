@@ -9,7 +9,13 @@ import {
 } from "react";
 import { Redirect, useLocation } from "wouter";
 import { api, setCsrfToken } from "./api";
-import { isActive, isLeadership, type Session, type User } from "./types";
+import {
+  hasAccessProof,
+  isActive,
+  isLeadership,
+  type Session,
+  type User,
+} from "./types";
 import { Button, ErrorState, Loading, Notice } from "./ui";
 
 interface AuthContextValue {
@@ -102,8 +108,9 @@ export function EmailSetupBanner() {
   return emailReady === false ? (
     <Notice tone="warning" title="Email delivery is not configured">
       Verification and password-reset emails cannot be sent yet. An
-      administrator must configure the email provider and verified sender. No
-      account can skip email verification.
+      administrator must configure the email provider and verified sender for
+      registration and email-based recovery. Existing password sign-in and
+      private administrator setup do not require email delivery.
     </Notice>
   ) : emailReady === null ? (
     <Notice>
@@ -162,8 +169,7 @@ export function AccountStatus() {
   const [error, setError] = useState<string | null>(null);
   if (!user) return <Redirect to="/login" />;
   const restricted = user.status === "SUSPENDED" || user.status === "REJECTED";
-  const unverified =
-    !restricted && (!user.emailVerified || user.status === "UNVERIFIED");
+  const unverified = !restricted && !hasAccessProof(user);
   const title = unverified
     ? "Verify your email address"
     : user.status === "PENDING_APPROVAL"
@@ -202,7 +208,7 @@ export function AccountStatus() {
         <strong>{user.fullName}</strong>
         <span>{user.email}</span>
       </div>
-      <EmailSetupBanner />
+      {unverified && <EmailSetupBanner />}
       {message && <Notice tone="success">{message}</Notice>}
       {error && <Notice tone="error">{error}</Notice>}
       <div className="button-row">

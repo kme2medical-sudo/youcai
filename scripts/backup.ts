@@ -13,6 +13,7 @@ import mysql, { type Connection, type RowDataPacket } from "mysql2";
  */
 const BUSINESS_TABLES = [
   "crm_users",
+  "crm_owner_admin_access",
   "crm_business_regions",
   "crm_countries",
   "crm_country_regions",

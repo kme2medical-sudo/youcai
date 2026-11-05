@@ -3,6 +3,7 @@
     { "path": "/", "title": "Dashboard" },
     { "path": "/login", "title": "Sign in" },
     { "path": "/register", "title": "Request access" },
+    { "path": "/admin-setup", "title": "Administrator setup" },
     { "path": "/verify-email", "title": "Verify email" },
     { "path": "/forgot-password", "title": "Forgot password" },
     { "path": "/reset-password", "title": "Reset password" },

@@ -14,7 +14,13 @@ import {
 import { toast } from "sonner";
 import { useResource } from "./api";
 import { useAuth } from "./session";
-import { hasPermission, roleName, type AuditEntry } from "./types";
+import {
+  accessMethodLabel,
+  hasAccessProof,
+  hasPermission,
+  roleName,
+  type AuditEntry,
+} from "./types";
 import {
   Badge,
   Button,
@@ -203,7 +209,7 @@ export function Dashboard() {
                 </div>
                 <div className="workspace-principle">
                   <span />
-                  Verified identities. Permission-based access. A clear audit
+                  Authorized accounts. Permission-based access. A clear audit
                   trail.
                 </div>
               </Section>
@@ -288,7 +294,7 @@ export function Profile() {
       <div className="profile-grid">
         <Section
           title="Account details"
-          description="Identity is verified by email, not by your requested role."
+          description="Access authorization and email ownership are separate from your requested role."
         >
           <div className="profile-summary">
             <span className="avatar avatar-large">
@@ -306,6 +312,11 @@ export function Profile() {
             <DataValue label="Email ownership">
               <Badge tone={user.emailVerified ? "green" : "amber"}>
                 {user.emailVerified ? "Verified" : "Not verified"}
+              </Badge>
+            </DataValue>
+            <DataValue label="Access authorization">
+              <Badge tone={hasAccessProof(user) ? "green" : "amber"}>
+                {accessMethodLabel(user)}
               </Badge>
             </DataValue>
             <DataValue label="Account ID">

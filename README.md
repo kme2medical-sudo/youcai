@@ -1,8 +1,14 @@
 # Youcai Medical CRM & ERP — Foundation V1
 
+## Current administrator access — local password login
+
+The five owner-designated administrators use private one-time personal-password setup, then ordinary email/password login directly as Active Admin. No Firebase or email-provider configuration is needed for them. Access is owner-authorized; email ownership is not falsely marked verified. See [administrator direct login](docs/administrator-direct-login.md). Other applicants keep email verification and approval.
+
 A focused CRM foundation for Youcai's internal team: verified email/password accounts, administrator approval, multi-role authorization, company information, customers and contacts. Built with **React 19, TypeScript, Vite, Express and `mysql2`** on Manus-managed hosting and a persistent MySQL-compatible database.
 
-> **Operational gate:** live account verification and password recovery require a real Resend API key, verified sender and public HTTPS origin. No live provider credentials are supplied. Registration/recovery fail closed without configuration; there is no mock login, seeded administrator or email-verification bypass. A source implementation or injected-mail test is not evidence of live email delivery.
+> **Latest administrator access:** the five owner-designated administrators use private one-time personal-password setup, then ordinary email/password login directly as Active Admin. No Firebase or email-provider configuration is needed for them. Their access is owner-authorized, not falsely marked email-verified. See [administrator direct login](docs/administrator-direct-login.md). Other applicants retain verification and approval.
+
+> **Operational gate for ordinary applicants/recovery:** live account verification and password recovery require a real Resend API key, verified sender and public HTTPS origin. No live provider credentials are supplied. Registration/recovery fail closed without configuration; there is no mock login, seeded administrator or email-verification bypass. A source implementation or injected-mail test is not evidence of live email delivery.
 
 ## Foundation V1 scope
 

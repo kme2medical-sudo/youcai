@@ -10,7 +10,14 @@ import {
 import { toast } from "sonner";
 import { api, useResource } from "./api";
 import { useAuth } from "./session";
-import { hasPermission, ROLES, roleName, type User } from "./types";
+import {
+  accessMethodLabel,
+  hasAccessProof,
+  hasPermission,
+  ROLES,
+  roleName,
+  type User,
+} from "./types";
 import {
   Badge,
   Button,
@@ -51,7 +58,7 @@ export function UserManagement() {
       <PageHeader
         eyebrow="GENERAL SETTINGS"
         title="User management"
-        description="Review access requests, approve verified accounts, and assign the roles your team needs."
+        description="Review access requests, manage authorized accounts, and assign the roles your team needs."
       />
       <div className="admin-summary">
         <span className="admin-summary-icon">
@@ -64,8 +71,9 @@ export function UserManagement() {
               : "Team access"}
           </strong>
           <p>
-            Email verification confirms ownership. Approval and assigned roles
-            determine access.
+            Email verification confirms mailbox ownership. Private owner
+            provisioning is a separate authorization method. Status and assigned
+            roles determine access.
           </p>
         </div>
         {pending > 0 && <Badge tone="amber">{pending} pending approval</Badge>}
@@ -117,7 +125,7 @@ export function UserManagement() {
               <thead>
                 <tr>
                   <th>Team member</th>
-                  <th>Verification / status</th>
+                  <th>Authorization / status</th>
                   <th>Requested role</th>
                   <th>Assigned roles</th>
                   <th>Registered</th>
@@ -148,18 +156,19 @@ export function UserManagement() {
                         <StatusBadge status={u.status} />
                         <small
                           className={
-                            u.emailVerified ? "verified-label" : "muted"
+                            hasAccessProof(u) ? "verified-label" : "muted"
                           }
                         >
-                          {u.emailVerified ? (
+                          {hasAccessProof(u) ? (
                             <CheckCircle2 size={12} />
                           ) : (
                             <LockKeyhole size={12} />
                           )}
-                          {u.emailVerified
-                            ? "Email verified"
-                            : "Email not verified"}
+                          {accessMethodLabel(u)}
                         </small>
+                        {!u.emailVerified && (
+                          <small className="muted">Email not verified</small>
+                        )}
                       </div>
                     </td>
                     <td>
@@ -227,7 +236,7 @@ export function UserManagement() {
     </>
   );
 }
-function UserModal({
+export function UserModal({
   account,
   onClose,
   onSaved,
@@ -250,9 +259,9 @@ function UserModal({
   async function submit(e: FormEvent) {
     e.preventDefault();
     if (self) return;
-    if (status === "ACTIVE" && !account.emailVerified) {
+    if (status === "ACTIVE" && !hasAccessProof(account)) {
       setError(
-        "This account must verify its email before it can be activated."
+        "This account needs email verification or owner authorization before it can be activated."
       );
       return;
     }
@@ -289,10 +298,10 @@ function UserModal({
       </div>
       <form onSubmit={submit}>
         {error && <Notice tone="error">{error}</Notice>}
-        {!account.emailVerified && (
+        {!hasAccessProof(account) && (
           <Notice tone="warning">
-            Email ownership is not verified. This account cannot be activated
-            until verification is complete.
+            This account has no access authorization. It cannot be activated
+            until email verification or private owner provisioning is complete.
           </Notice>
         )}
         <div className="modal-field">
@@ -312,9 +321,9 @@ function UserModal({
               </option>
               <option
                 value="ACTIVE"
-                disabled={!account.emailVerified || !approve}
+                disabled={!hasAccessProof(account) || !approve}
               >
-                Active — approved
+                Active — authorized
               </option>
               <option value="REJECTED" disabled={!approve && !manage}>
                 Rejected
@@ -359,7 +368,7 @@ function UserModal({
         </div>
         <div className="panel-note">
           Role requests never grant privileges automatically. Only an active,
-          verified account can access business modules.
+          authorized account can access business modules.
         </div>
         <div className="modal-actions">
           <Button

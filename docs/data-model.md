@@ -18,6 +18,7 @@ erDiagram
     crm_permissions ||--o{ crm_role_permissions : included
     crm_users ||--o| crm_role_requests : requests
     crm_roles ||--o{ crm_role_requests : requested
+    crm_users ||--o| crm_owner_admin_access : owner_authorized
     crm_users ||--o| crm_auth_credentials : has
     crm_users ||--o{ crm_auth_sessions : authenticates
     crm_users ||--o{ crm_auth_tokens : verifies_or_resets
@@ -78,3 +79,7 @@ The seed script inserts missing reference rows and initial role defaults while p
 There are **no Products, prices, quotes, inventory, technical-document, workflow or SSO tables** in Foundation V1. Future permission names are documentation reservations only, not implemented APIs or seeded product grants.
 
 The default [manual export](operations.md#database-export-and-recovery) retains CRM identity metadata and actor/role foreign keys but excludes credential/session/token/rate-limit tables. It therefore preserves business relationships while deliberately omitting the ability to sign in from the export alone. A full credential-bearing export requires explicit authorization and external encryption; every restored deployment must invalidate sessions and single-use tokens. The legacy starter `users` and unknown future tables are deliberately omitted until separately reviewed.
+
+## Owner-provisioned administrator access
+
+Additive migration 002_owner_admin_access.sql introduces crm_owner_admin_access, keyed by the immutable user UUID with authorization and password-setup completion timestamps. It is distinct from email_verified_at: an owner-provisioned account can have authorized Active/Admin access while its emailVerified flag remains false. Only exact five designated emails with completed owner authorization qualify; a public role request or email string never creates this proof. Private ADMIN_SETUP tokens reuse the hashed/expiring auth-token table, are consumed once and excluded from default backups with other tokens. Backup business metadata now includes the reviewed owner-authorization table; restore still requires an independently approved credential-recovery process. No applied migration was edited and no startup seed creates these identities.

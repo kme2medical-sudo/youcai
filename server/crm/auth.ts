@@ -5,6 +5,7 @@ import { registerSchema, emailSchema, passwordSchema } from "../../shared/crm";
 import { getPool, rows, run, transaction } from "./db";
 import { HttpError, hash, opaque, csrfFor, hashPassword, checkPassword, shouldBootstrap, getUser, resolveSession, sessionCookie, safeEqual, limitAuth, audit, lockSecurity } from "./security";
 import { emailReady, sendAccountMail } from "./mail";
+import { checkOwnerAdminInvitation, completeOwnerAdminSetup } from "./admin-enrollment";
 export const authRouter = Router();
 const asyncRoute = (handler: (req: Request, res: Response) => Promise<unknown>) => (req: Request, res: Response, next: NextFunction) => { Promise.resolve(handler(req, res)).catch(next); };
 const message = "If your request is eligible, an email will be sent with next steps.";
@@ -21,7 +22,20 @@ async function issueMail(id: string, email: string, purpose: "VERIFY" | "RESET")
   });
   try { await sendAccountMail(email, purpose, token); } catch { await run(getPool(), "DELETE FROM crm_auth_tokens WHERE token_hash = ?", [hash(token)]); /* Public response stays generic; caller can retry. Never log email URLs or provider content. */ }
 }
-authRouter.get("/config", (_req, res) => res.json({ emailReady: emailReady() }));
+authRouter.get("/config", (_req, res) => res.json({ emailReady: emailReady(), adminSetupAvailable: true }));
+authRouter.post("/admin-setup/check", asyncRoute(async (req, res) => {
+  await limitAuth(req, "admin-setup-check");
+  const input = z.object({ token: tokenSchema }).strict().safeParse(req.body);
+  if (!input.success) throw new HttpError(400, "This link is invalid or expired");
+  return res.json(await checkOwnerAdminInvitation(input.data.token));
+}));
+authRouter.post("/admin-setup", asyncRoute(async (req, res) => {
+  await limitAuth(req, "admin-setup");
+  const input = z.object({ token: tokenSchema, fullName: z.string().trim().min(2).max(160), password: passwordSchema }).strict().safeParse(req.body);
+  if (!input.success) throw new HttpError(400, "This link is invalid or expired");
+  await completeOwnerAdminSetup(input.data);
+  return res.json({ message: "Administrator setup completed. Sign in with your chosen password." });
+}));
 authRouter.get("/me", asyncRoute(async (req, res) => { const auth = await resolveSession(req); return res.json(auth ? { user: auth.user, csrfToken: auth.csrfToken } : { user: null }); }));
 authRouter.post("/register", asyncRoute(async (req, res) => {
   setup(); const input = registerSchema.parse(req.body); await limitAuth(req, "register", input.email);
