@@ -73,9 +73,12 @@ alberto@youcaimedical.com
 eniodeleon87@gmail.com
 eadlr1@gmail.com
 kme2medical@gmail.com
+wangxukai@youcaimedical.com
 ```
 
 There is no blanket `@youcaimedical.com` administrator rule, shared default password, development backdoor or mailbox-password authentication. Users may sign in to see an unverified/pending/suspended status page without gaining business permissions.
+
+All five become ACTIVE + Admin on successful initial email ownership verification without another administrator approving them. Every other verified applicant stays PENDING_APPROVAL. See the [first-administrator registration guide](docs/first-administrator.md) for the published URL, exact steps, security controls and current email-delivery gate.
 
 Email links carry a sensitive `token` in the URL query and the SPA submits it by POST for verification/reset. Do not put these links in logs, screenshots or analytics. Configure real email first and verify final HTTPS routes/cookies/mail delivery before declaring the account lifecycle accepted.
 
@@ -97,3 +100,7 @@ Read the [acceptance report](docs/acceptance-report.md) for observed pass/blocke
 Live verification/recovery delivery is blocked until a real provider/sender/origin is configured; metadata readiness does not prove delivery. Native existing-repository sync is unsupported, and a Manus checkpoint/publication must not be presented as a GitHub commit/PR. Shared managed dev/production storage is not isolated staging. End-to-end HTTPS/session behavior, provider delivery, database restore and publication require their own observed checks; do not infer them from screenshots, TypeScript compilation or a green isolated unit test.
 
 Company identity fields start blank apart from neutral UTC/USD defaults; admins must enter verified business information. Country-region mappings are business configuration, not verified pricing territories. There is no automatic backup schedule, destructive restore importer or claimed point-in-time recovery. Default exports contain confidential identity/business data but omit password hashes and authentication state, so recovering sign-in requires an approved credential-recovery procedure or separately authorized encrypted full export. **GitHub is not a database backup.** Keep all JSON exports private, encrypted, outside every source repository and out of commits.
+
+## Alibaba Mail and verification sender
+
+The corporate receiving domain remains on Alibaba Mail and must not be changed. This project does not expose native delivery for app-owned email/password verification/reset; Manus OAuth/private-site login and owner notifications are not substitutes. Use the existing mail adapter with a separate user-controlled sending domain, without moving corporate inboxes or sharing mailbox passwords. See [authentication/email decision and exact activation steps](docs/authentication-email-decision.md). Five exact owners remain verified-only ACTIVE/Admin; no shared/default password or unauthenticated administration is added. Provider setup and live delivery remain gated.

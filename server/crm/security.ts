@@ -11,7 +11,7 @@ export function safeEqual(a: string, b: string): boolean { const x = Buffer.from
 const derive = (password: string, salt: string) => new Promise<Buffer>((resolve, reject) => scrypt(password, salt, 64, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (err, result) => err ? reject(err) : resolve(result)));
 export async function hashPassword(password: string): Promise<string> { const salt = randomBytes(16).toString("hex"); const key = await derive(password, salt); return `scrypt$32768$8$1$${salt}$${key.toString("hex")}`; }
 export async function checkPassword(password: string, encoded: string): Promise<boolean> { const parts = encoded.split("$"); if (parts.length !== 6 || parts.slice(0, 4).join("$") !== "scrypt$32768$8$1" || !/^[a-f0-9]{32}$/.test(parts[4]) || !/^[a-f0-9]{128}$/.test(parts[5])) return false; return safeEqual((await derive(password, parts[4])).toString("hex"), parts[5]); }
-export const BOOTSTRAP_EMAILS = new Set(["alberto@youcaimedical.com", "eniodeleon87@gmail.com", "eadlr1@gmail.com", "kme2medical@gmail.com"]);
+export const BOOTSTRAP_EMAILS = new Set(["alberto@youcaimedical.com", "eniodeleon87@gmail.com", "eadlr1@gmail.com", "kme2medical@gmail.com", "wangxukai@youcaimedical.com"]);
 export const shouldBootstrap = (email: string, emailVerified: boolean, alreadyCompleted = false): boolean => emailVerified && !alreadyCompleted && BOOTSTRAP_EMAILS.has(email.trim().toLowerCase());
 export const isTopLevel = (user: User): boolean => user.roles.includes("admin") || user.roles.includes("ceo");
 export function requireActive(user: User | null): asserts user is User { if (!user) throw new HttpError(401, "Sign in is required"); if (user.status !== "ACTIVE" || !user.emailVerified) throw new HttpError(403, "Your account is not active"); }

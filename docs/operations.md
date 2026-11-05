@@ -46,8 +46,8 @@ Provision Resend, a verified sender and the exact public origin first. `GET /api
 
 The first-Admin procedure after configuration is:
 
-1. The owner of one of the four exact addresses registers normally, entering name, email, password and one requested role.
-2. The owner receives the verification mail, opens its link, and explicitly submits verification. Backend token validation—not possession of an email string—confirms ownership.
+1. The owner of one of the five exact addresses registers normally, entering name, email, their own password and one requested role. There is no shared or default password.
+2. The owner receives the verification mail, opens its link, and explicitly submits verification with their chosen password and confirmation (the registration password can be reused). Backend token validation—not possession of an email string—confirms ownership; all preverification sessions are revoked before access is granted.
 3. On successful first verification, an eligible exact allowlisted account receives Admin and ACTIVE status idempotently. Other verified applicants remain PENDING_APPROVAL and receive no business data until an Admin/CEO approves them and assigns roles.
 4. Admin/CEO can assign multiple roles, reject or suspend applicants. Selecting a desired role is never an assignment. Administrative mutations are audited and prevent self-role/status change or loss of the last effective active top-level administrator.
 
@@ -58,6 +58,7 @@ alberto@youcaimedical.com
 eniodeleon87@gmail.com
 eadlr1@gmail.com
 kme2medical@gmail.com
+wangxukai@youcaimedical.com
 ```
 
 ### Session and account-token behavior
@@ -149,3 +150,7 @@ No destructive restore script is supplied. Recovery is a separate, explicitly au
 7. Run isolated security/CRM acceptance checks, including logout/reset session revocation, before an approved cutover. Provision fresh target credentials and runtime secrets separately. Confirm public origin/email delivery and HTTPS behavior. Keep the original shared database untouched until the data owner approves a documented cutover and rollback plan.
 
 A successful export is not a demonstrated recovery. Record restore-drill evidence and unresolved gaps separately. For data beyond the exporter's reviewed tables or for point-in-time recovery, use the managed provider's documented export/backup service only after confirming its actual availability and permissions.
+
+## Alibaba Mail remains the receiving service
+
+No CRM login checks an Alibaba Mail password or requires its server administration. The currently exposed native Manus OAuth and owner-only notification capabilities do not provide CRM-owned password verification/reset to arbitrary users. A separate sending domain controlled by the user works with the existing sender/recipient-independent mail adapter; corporate recipients and Gmail accounts remain unchanged. Configure DKIM/SPF/return-path only under the controlled sender domain, never replace youcaimedical.com MX records. See authentication-email-decision.md for primary-source findings, setup and exact first-owner steps. Email readiness validates setting shape, not domain ownership/provider credentials/inbox delivery. Canonical origins reject URL credentials, paths, queries, fragments and non-HTTPS protocols.

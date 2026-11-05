@@ -14,3 +14,15 @@
 ## Evidence and remaining gates
 
 Implemented outcomes are backed by 28 backend tests (17 real TiDB rollback integration), 43 frontend tests, successful typecheck/build, and signed-out HTTPS Preview/API checks. The security review finding was remediated with owner-chosen verification credentials and session revocation. Live email onboarding, authenticated browser QA, true backup/restore, and publication/GitHub references remain separately reported gates; no bypass is shipped. See docs/acceptance-report.md.
+
+## Administrator bootstrap update — 5 November 2026
+
+- [x] Exactly five verified owners bootstrap once to ACTIVE + Admin without another administrator's approval: alberto@youcaimedical.com, eniodeleon87@gmail.com, eadlr1@gmail.com, kme2medical@gmail.com, wangxukai@youcaimedical.com. The phrase 'four accounts' in the follow-up refers to the five explicitly enumerated addresses. Each owner chooses their own 12–128 character password during registration and confirms their final password on the private verification form. No shared or hardcoded default, no domain wildcard, no direct SQL grants, no role request granting access. Preserve atomic verification, audit, hashed password/tokens, session revocation, single-use bootstrap and suspension/role-removal protection. Validate all five, outsiders, expiry/replay and user-owned credentials, then document exact live URL/onboarding and remaining email/platform-access gates.
+
+Five-account evidence: 29 backend/43 frontend tests, typecheck and build pass. Mail settings supplied securely but initially fail format validation; replacement required. Publication authorized by owner on 5 November 2026; preserve private visibility and update only existing feature PR, not GitHub main.
+
+## Alibaba-safe email delivery revision
+
+- [x] Check native managed CRM password/verification/reset support; do not confuse Manus login/private gate or owner notifications with CRM mail. If unsupported, preserve five exact verified-only administrator identities/personal passwords and propose a separate user-controlled sending domain. Do not change Alibaba Mail/corporate DNS, remove verification, create default admins, expose tokens, reopen canceled cards, or assume sender/domain ownership. Document exact first-admin registration/login, update safe readiness validation and publish the authorized update; request a controlled domain before configuring real sending.
+
+Alibaba-safe evidence: 5 mail/11 policy/18 real SQL affected tests pass with typecheck/build. No real identities or business fixtures remain. Updated native investigation and controlled-domain proposal included; live delivery remains blocked rather than bypassed.

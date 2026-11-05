@@ -223,8 +223,9 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
           <div className="auth-success-actions">
             {mode === "register" && (
               <p>
-                After verification, your account will wait for an Admin or CEO
-                to review your request. Selecting a role does not grant access.
+                Verify your email and confirm your personal password. Authorized
+                initial administrators are activated automatically; other accounts
+                wait for Admin or CEO approval. A requested role alone grants no access.
               </p>
             )}
             <Link href="/login" className="btn btn-primary">
@@ -329,7 +330,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               <Field
                 label="Requested role"
                 required
-                hint="A request only. Your administrator assigns roles after approval."
+                hint="A request only, not a grant. Verified initial administrators are assigned Admin automatically."
               >
                 <select
                   required
@@ -354,8 +355,8 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
               <div className="auth-approval-note">
                 <ShieldCheck size={18} />
                 <span>
-                  Email verification and administrator approval are required
-                  before workspace access.
+                  Email verification is required. Authorized initial administrators
+                  become active automatically; all other accounts need approval.
                 </span>
               </div>
             )}

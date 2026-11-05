@@ -6,9 +6,9 @@ const base: User = { id: "actor", fullName: "Tester", email: "tester@example.inv
 afterEach(() => { vi.unstubAllEnvs(); setTestMailTransport(undefined); });
 describe("backend policy and credential isolation", () => {
   it("only bootstraps verified exact allowlist entries once", () => {
-    expect(BOOTSTRAP_EMAILS.size).toBe(4);
-    for (const email of BOOTSTRAP_EMAILS) { expect(shouldBootstrap(email, false)).toBe(false); expect(shouldBootstrap(email, true)).toBe(true); expect(shouldBootstrap(email, true, true)).toBe(false); }
-    for (const email of ["admin@youcaimedical.com", "alberto@youcaimedical.com.attacker.example", "fakealberto@youcaimedical.com", "eniodeleon87+admin@gmail.com"]) expect(shouldBootstrap(email, true)).toBe(false);
+    expect([...BOOTSTRAP_EMAILS].sort()).toEqual(["alberto@youcaimedical.com", "eniodeleon87@gmail.com", "eadlr1@gmail.com", "kme2medical@gmail.com", "wangxukai@youcaimedical.com"].sort());
+    for (const email of BOOTSTRAP_EMAILS) { expect(shouldBootstrap(email, false)).toBe(false); expect(shouldBootstrap(email, true)).toBe(true); expect(shouldBootstrap(email, true, true)).toBe(false); expect(shouldBootstrap(`  ${email.toUpperCase()}  `, true)).toBe(true); }
+    for (const email of ["admin@youcaimedical.com", "alberto@youcaimedical.com.attacker.example", "fakealberto@youcaimedical.com", "eniodeleon87+admin@gmail.com", "wangxukai+admin@youcaimedical.com", "wangxukai@youcaimedical.com.attacker.example", "other@youcaimedical.com"]) expect(shouldBootstrap(email, true)).toBe(false);
   });
   it("scrypt salts differ, valid passwords check, plaintext is absent", async () => {
     const password = "correct horse battery staple";

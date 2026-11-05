@@ -58,7 +58,7 @@ async function approve(client: Client, roles: string[]) { expect((await request(
     setTestMailTransport(async message => { mail.push(message); });
     const app = express(); app.use("/api", crmRouter); server = createServer(app); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); origin = `http://127.0.0.1:${(server.address() as any).port}`;
     // Only exact verified allowlisted identities may become test admins, and all are rolled back.
-    const conflict = await rows(connection, "SELECT id FROM crm_users WHERE email_normalized IN ('alberto@youcaimedical.com', 'eniodeleon87@gmail.com', 'eadlr1@gmail.com', 'kme2medical@gmail.com')"); if (conflict.length) throw new Error("Allowlisted identities already exist. Refusing to change real identities; run integration against an isolated copy.");
+    const conflict = await rows(connection, "SELECT id FROM crm_users WHERE email_normalized IN ('alberto@youcaimedical.com', 'eniodeleon87@gmail.com', 'eadlr1@gmail.com', 'kme2medical@gmail.com', 'wangxukai@youcaimedical.com')"); if (conflict.length) throw new Error("Allowlisted identities already exist. Refusing to change real identities; run integration against an isolated copy.");
     admin = await signup("alberto@youcaimedical.com", "employee"); secondAdmin = await signup("eniodeleon87@gmail.com", "technician");
     pending = await signup(uniqueEmail("pending"), "admin");
     sales = await signup(uniqueEmail("sales"), "sales"); await approve(sales, ["sales"]);
@@ -74,9 +74,87 @@ async function approve(client: Client, roles: string[]) { expect((await request(
     if (actualDb) await actualDb.closePool();
   }, 30000);
   it("verified exact allowlist becomes admin; ordinary verification stays pending with no roles", async () => {
-    const a = await getUser(connection, admin.userId), p = await getUser(connection, pending.userId); expect(a?.status).toBe("ACTIVE"); expect(a?.emailVerified).toBe(true); expect(a?.roles).toEqual(["admin"]); expect(a?.permissions).toHaveLength(13);
+    for (const fixture of [admin, secondAdmin]) { const a = await getUser(connection, fixture.userId); expect(a?.status).toBe("ACTIVE"); expect(a?.emailVerified).toBe(true); expect(a?.roles).toEqual(["admin"]); expect(a?.permissions).toHaveLength(13); expect(a?.permissions).toEqual([...PERMISSION_CODES].sort()); }
+    const p = await getUser(connection, pending.userId);
     expect(p?.status).toBe("PENDING_APPROVAL"); expect(p?.roles).toEqual([]); expect(p?.permissions).toEqual([]); expect(p?.requestedRole).toBe("admin");
   });
+  it("Wang's exact mailbox bootstraps once after owner verification, never restoring revoked admin rights or granting domain/alias matches", async () => {
+    const email = "wangxukai@youcaimedical.com", registrationPassword = "Wang Personally Chosen Registration Password 2026", ownerPassword = "Wang Personally Chosen Verification Password 2026", resetPassword = "Wang Personally Chosen Recovery Password 2026";
+    const nearMatches = [`ordinary-${randomUUID()}@youcaimedical.com`, `wangxukai+${randomUUID()}@youcaimedical.com`], mailCount = mail.length;
+    await connection.query("SAVEPOINT test_wang_bootstrap");
+    try {
+      const registration = await request("/auth/register", "POST", { fullName: "Rollback Wang Mailbox Owner", email, password: registrationPassword, requestedRole: "employee" });
+      expect(registration.status).toBe(200); expect(registration.data).toEqual({ message: expect.any(String) });
+      const created = (await rows(connection, "SELECT id, status, email_verified_at, bootstrap_completed FROM crm_users WHERE email_normalized = ?", [email]))[0];
+      expect(created.status).toBe("UNVERIFIED"); expect(created.email_verified_at).toBeNull(); expect(Number(created.bootstrap_completed)).toBe(0);
+      expect(await getUser(connection, created.id)).toMatchObject({ email, status: "UNVERIFIED", emailVerified: false, requestedRole: "employee", roles: [], permissions: [] });
+      const roleCount = async () => Number((await rows(connection, "SELECT COUNT(*) AS total FROM crm_user_roles WHERE user_id = ?", [created.id]))[0].total);
+      const bootstrapCount = async () => Number((await rows(connection, "SELECT COUNT(*) AS total FROM crm_audit_logs WHERE entity_id = ? AND action = 'auth.verified_admin_bootstrap'", [created.id]))[0].total);
+      expect(await roleCount()).toBe(0); expect(await bootstrapCount()).toBe(0);
+      const initialLogin = await request("/auth/login", "POST", { email, password: registrationPassword }); expect(initialLogin.status).toBe(200);
+      expect(initialLogin.data.user).toMatchObject({ id: created.id, status: "UNVERIFIED", emailVerified: false, roles: [], permissions: [] });
+      const earlierSession: Client = { userId: created.id, cookie: initialLogin.cookie!.split(";")[0], csrf: initialLogin.data.csrfToken };
+      expect((await request("/auth/me", "GET", undefined, earlierSession)).data.user).toMatchObject({ status: "UNVERIFIED", roles: [], permissions: [] });
+      for (const path of ["/customers", "/users", "/company"]) expect((await request(path, "GET", undefined, earlierSession)).status).toBe(403);
+      const token = mailedToken(email); expect(JSON.stringify(registration.data)).not.toContain(token);
+      // The mailbox owner personally supplies the durable password to the mailed form; no admin approval is involved.
+      const verified = await request("/auth/verify", "POST", { token, password: ownerPassword }); expect(verified.status).toBe(200); expect(verified.cookie).toBeNull();
+      const ownerUser = await getUser(connection, created.id);
+      expect(ownerUser).toMatchObject({ email, status: "ACTIVE", emailVerified: true, requestedRole: "employee", roles: ["admin"] });
+      expect(ownerUser?.permissions).toHaveLength(13); expect(ownerUser?.permissions).toEqual([...PERMISSION_CODES].sort());
+      expect(await roleCount()).toBe(1); expect(await bootstrapCount()).toBe(1);
+      expect(await rows(connection, "SELECT action FROM crm_audit_logs WHERE entity_id = ? AND action IN ('user.approval_changed', 'user.roles_status_changed')", [created.id])).toEqual([]);
+      const marker = (await rows(connection, "SELECT email_verified_at, bootstrap_completed FROM crm_users WHERE id = ?", [created.id]))[0];
+      expect(marker.email_verified_at).not.toBeNull(); expect(Number(marker.bootstrap_completed)).toBe(1);
+      expect(Number((await rows(connection, "SELECT COUNT(*) AS total FROM crm_auth_sessions WHERE user_id = ?", [created.id]))[0].total)).toBe(0);
+      expect((await request("/auth/me", "GET", undefined, earlierSession)).data.user).toBeNull();
+      for (const path of ["/customers", "/users", "/company"]) expect((await request(path, "GET", undefined, earlierSession)).status).toBe(401);
+      for (const oldPassword of [registrationPassword, password]) expect((await request("/auth/login", "POST", { email, password: oldPassword })).status).toBe(401);
+      const ownerLogin = await request("/auth/login", "POST", { email, password: ownerPassword }); expect(ownerLogin.status).toBe(200);
+      expect(ownerLogin.data.user).toMatchObject({ id: created.id, status: "ACTIVE", emailVerified: true, roles: ["admin"] }); expect(ownerLogin.data.user.permissions).toEqual([...PERMISSION_CODES].sort());
+      const owner: Client = { userId: created.id, cookie: ownerLogin.cookie!.split(";")[0], csrf: ownerLogin.data.csrfToken };
+      for (const path of ["/customers", "/users", "/company"]) expect((await request(path, "GET", undefined, owner)).status).toBe(200);
+      const credential = (await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [created.id]))[0].password_hash;
+      const replay = await request("/auth/verify", "POST", { token, password: resetPassword }); expect(replay.status).toBe(400); expect(replay.data).toEqual({ message: "This link is invalid or expired" });
+      expect(await getUser(connection, created.id)).toEqual(ownerUser);
+      expect((await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [created.id]))[0].password_hash).toBe(credential);
+      const verifiedMailCount = mail.length;
+      expect((await request("/auth/resend", "POST", { email })).status).toBe(200); expect(mail).toHaveLength(verifiedMailCount);
+      expect(await roleCount()).toBe(1); expect(await bootstrapCount()).toBe(1);
+      // Once another administrator revokes access, account-recovery routes must not bootstrap it again.
+      expect((await request(`/users/${created.id}`, "PUT", { status: "SUSPENDED", roles: [] }, admin)).status).toBe(200);
+      const assertRevoked = async () => {
+        expect(await getUser(connection, created.id)).toMatchObject({ email, status: "SUSPENDED", emailVerified: true, roles: [], permissions: [] });
+        expect(await roleCount()).toBe(0); expect(await bootstrapCount()).toBe(1);
+        expect((await rows(connection, "SELECT email_verified_at, bootstrap_completed FROM crm_users WHERE id = ?", [created.id]))[0]).toEqual(marker);
+      };
+      await assertRevoked();
+      for (const path of ["/customers", "/users", "/company"]) expect((await request(path, "GET", undefined, owner)).status).toBe(403);
+      expect((await request("/auth/verify", "POST", { token, password: resetPassword })).status).toBe(400); await assertRevoked();
+      expect((await request("/auth/register", "POST", { fullName: "Rollback Wang Re-registration", email, password: resetPassword, requestedRole: "admin" })).status).toBe(200);
+      expect((await request("/auth/resend", "POST", { email })).status).toBe(200); expect(mail).toHaveLength(verifiedMailCount); await assertRevoked();
+      expect(await rows(connection, "SELECT token_hash FROM crm_auth_tokens WHERE user_id = ? AND purpose = 'VERIFY'", [created.id])).toEqual([]);
+      expect((await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [created.id]))[0].password_hash).toBe(credential);
+      expect((await request("/auth/forgot", "POST", { email })).status).toBe(200); await assertRevoked();
+      const resetToken = mailedToken(email);
+      expect((await request("/auth/reset", "POST", { token: resetToken, password: resetPassword })).status).toBe(200); await assertRevoked();
+      expect((await request("/auth/me", "GET", undefined, owner)).data.user).toBeNull();
+      const recoveredLogin = await request("/auth/login", "POST", { email, password: resetPassword }); expect(recoveredLogin.status).toBe(200);
+      expect(recoveredLogin.data.user).toMatchObject({ id: created.id, status: "SUSPENDED", roles: [], permissions: [] });
+      for (const nearMatch of nearMatches) {
+        const account = await signup(nearMatch, "employee");
+        expect(await getUser(connection, account.userId)).toMatchObject({ email: nearMatch, status: "PENDING_APPROVAL", emailVerified: true, requestedRole: "employee", roles: [], permissions: [] });
+        expect(Number((await rows(connection, "SELECT bootstrap_completed FROM crm_users WHERE id = ?", [account.userId]))[0].bootstrap_completed)).toBe(0);
+        expect(await rows(connection, "SELECT role_code FROM crm_user_roles WHERE user_id = ?", [account.userId])).toEqual([]);
+        expect(await rows(connection, "SELECT action FROM crm_audit_logs WHERE entity_id = ? AND action = 'auth.verified_admin_bootstrap'", [account.userId])).toEqual([]);
+        for (const path of ["/customers", "/users", "/company"]) expect((await request(path, "GET", undefined, account)).status).toBe(403);
+      }
+      await assertRevoked();
+    } finally {
+      await connection.query("ROLLBACK TO SAVEPOINT test_wang_bootstrap"); await connection.query("RELEASE SAVEPOINT test_wang_bootstrap"); mail.splice(mailCount);
+      expect(await rows(connection, "SELECT id FROM crm_users WHERE email_normalized IN (?, ?, ?)", [email, ...nearMatches])).toEqual([]);
+    }
+  }, 60000);
   it("mailed owner verification defeats allowlisted account preregistration and revokes every attacker session", async () => {
     await connection.query("SAVEPOINT test_prehijack");
     try {
@@ -136,7 +214,7 @@ async function approve(client: Client, roles: string[]) { expect((await request(
       }
       await run(connection, "UPDATE crm_users SET status = 'PENDING_APPROVAL' WHERE id = ?", [account.userId]);
       expect((await request("/auth/verify", "POST", { token, password: ownerPassword })).status).toBe(200);
-      expect((await getUser(connection, account.userId))).toMatchObject({ email, emailVerified: true, status: "ACTIVE", roles: ["admin"] }); expect((await request("/auth/me", "GET", undefined, account)).data.user).toBeNull();
+      expect((await getUser(connection, account.userId))).toMatchObject({ email, emailVerified: true, status: "ACTIVE", roles: ["admin"], permissions: [...PERMISSION_CODES].sort() }); expect((await request("/auth/me", "GET", undefined, account)).data.user).toBeNull();
       // Simulate a stale token from a racing resend/import. It must not replace a verified credential or re-elevate a suspended identity.
       const stale = opaque(); await run(connection, "INSERT INTO crm_auth_tokens (token_hash,user_id,purpose,expires_at) VALUES (?,?,'VERIFY',?)", [hash(stale), account.userId, new Date(Date.now() + 3600000)]);
       const verifiedCredential = (await rows(connection, "SELECT password_hash FROM crm_auth_credentials WHERE user_id = ?", [account.userId]))[0].password_hash;
