@@ -1,0 +1,56 @@
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { hashPassword, checkPassword, hash, opaque, csrfFor, shouldBootstrap, BOOTSTRAP_EMAILS, requirePermission, validateRoleChange, protectRole, checkOrigin } from "../server/crm/security";
+import { setTestMailTransport, emailReady } from "../server/crm/mail";
+import { PERMISSION_CODES, CUSTOMER_TYPES, LEGAL_ENTITY_TYPES, SALUTATIONS, customerSchema, contactSchema, companySchema, registerSchema, type User } from "../shared/crm";
+const base: User = { id: "actor", fullName: "Tester", email: "tester@example.invalid", status: "ACTIVE", emailVerified: true, roles: ["sales", "pricing"], permissions: ["customers.read", "customers.create", "customers.update", "contacts.manage"] };
+afterEach(() => { vi.unstubAllEnvs(); setTestMailTransport(undefined); });
+describe("backend policy and credential isolation", () => {
+  it("only bootstraps verified exact allowlist entries once", () => {
+    expect(BOOTSTRAP_EMAILS.size).toBe(4);
+    for (const email of BOOTSTRAP_EMAILS) { expect(shouldBootstrap(email, false)).toBe(false); expect(shouldBootstrap(email, true)).toBe(true); expect(shouldBootstrap(email, true, true)).toBe(false); }
+    for (const email of ["admin@youcaimedical.com", "alberto@youcaimedical.com.attacker.example", "fakealberto@youcaimedical.com", "eniodeleon87+admin@gmail.com"]) expect(shouldBootstrap(email, true)).toBe(false);
+  });
+  it("scrypt salts differ, valid passwords check, plaintext is absent", async () => {
+    const password = "correct horse battery staple";
+    const a = await hashPassword(password), b = await hashPassword(password);
+    expect(a).not.toBe(b); expect(a).not.toContain(password); expect(await checkPassword(password, a)).toBe(true); expect(await checkPassword("bad password", a)).toBe(false); expect(await checkPassword(password, "plain")).toBe(false);
+  });
+  it("random opaque session and bound CSRF tokens are 256-bit and nonplaintext hashes", () => {
+    const a = opaque(), b = opaque(); expect(a).toHaveLength(43); expect(a).not.toBe(b); expect(hash(a)).toHaveLength(64); expect(csrfFor(a)).toHaveLength(43); expect(csrfFor(a)).not.toBe(csrfFor(b)); expect(hash(csrfFor(a))).not.toBe(csrfFor(a));
+  });
+  it("denies all unverified/inactive business access and defaults to no permissions", () => {
+    expect(() => requirePermission(null, "customers.read")).toThrow();
+    for (const status of ["UNVERIFIED", "PENDING_APPROVAL", "REJECTED", "SUSPENDED"] as const) expect(() => requirePermission({ ...base, status }, "customers.read")).toThrow();
+    expect(() => requirePermission({ ...base, emailVerified: false }, "customers.read")).toThrow(); expect(() => requirePermission({ ...base, permissions: [] }, "customers.read")).toThrow();
+    expect(() => requirePermission(base, "customers.read")).not.toThrow(); expect(() => requirePermission(base, "customers.archive")).toThrow();
+    expect(() => requirePermission({ ...base, permissions: [...PERMISSION_CODES] }, "roles.manage", true)).toThrow();
+  });
+  it("forbids self modification, unverified activation and last effective admin loss", () => {
+    expect(() => validateRoleChange("a", "a", true, "ACTIVE", ["admin"], 2)).toThrow(); expect(() => validateRoleChange("a", "b", false, "ACTIVE", ["employee"], 2)).toThrow(); expect(() => validateRoleChange("a", "b", true, "ACTIVE", [], 2)).toThrow(); expect(() => validateRoleChange("a", "b", true, "SUSPENDED", [], 0)).toThrow(); expect(() => validateRoleChange("a", "b", true, "ACTIVE", ["sales", "pricing"], 1)).not.toThrow();
+  });
+  it("preserves every top-level core permission", () => { for (const code of ["admin", "ceo"]) { expect(() => protectRole(code, [])).toThrow(); expect(() => protectRole(code, [...PERMISSION_CODES])).not.toThrow(); } expect(() => protectRole("employee", [])).not.toThrow(); });
+  it("origin checks accept trusted HTTPS public host without internal scheme inference and reject attackers", () => {
+    const req = (headers: Record<string,string>) => ({ get: (key:string) => headers[key] }) as any;
+    expect(() => checkOrigin(req({ origin: "https://preview.example", host: "preview.example" }))).not.toThrow(); expect(() => checkOrigin(req({ origin: "https://evil.example", host: "preview.example" }))).toThrow(); expect(() => checkOrigin(req({ origin: "http://preview.example", host: "preview.example" }))).toThrow();
+    vi.stubEnv("APP_PUBLIC_URL", "https://app.youcaimedical.example"); expect(() => checkOrigin(req({ origin: "https://app.youcaimedical.example", host: "internal.service" }))).not.toThrow(); expect(() => checkOrigin(req({ referer: "https://evil.example/login", host: "preview.example" }))).toThrow();
+  });
+  it("mail is unavailable without config and injection is forbidden in production", () => {
+    vi.stubEnv("RESEND_API_KEY", ""); vi.stubEnv("EMAIL_FROM", ""); vi.stubEnv("APP_PUBLIC_URL", ""); expect(emailReady()).toBe(false);
+    setTestMailTransport(async () => {}); expect(emailReady()).toBe(true); vi.stubEnv("NODE_ENV", "production"); expect(emailReady()).toBe(false); expect(() => setTestMailTransport(async () => {})).toThrow();
+  });
+});
+describe("backend strict validation", () => {
+  it("keeps exact independent enums and rejects registered entities without legal name", () => {
+    expect(CUSTOMER_TYPES).toHaveLength(6); expect(LEGAL_ENTITY_TYPES).toHaveLength(5); expect(SALUTATIONS).toHaveLength(9);
+    const input = { displayName:"Clinic", customerType:"Hospital/Clinic", countryCode:"TR", legalEntityType:"Corporation/S.A." };
+    expect(customerSchema.safeParse(input).success).toBe(false); expect(customerSchema.parse({ ...input, legalName:"Registered Company" }).countryCode).toBe("TR");
+    expect(customerSchema.safeParse({ ...input, legalName:"Company", status:"ARCHIVED" }).success).toBe(false);
+    expect(customerSchema.parse({ displayName:"Practitioner", customerType:"Doctor/Individual Practitioner", countryCode:"eg", legalEntityType:"Individual/Sole Proprietor" }).countryCode).toBe("EG");
+  });
+  it("normalizes signup email and makes requested role a valid code, never permission", () => {
+    const value = registerSchema.parse({ fullName:" Test User ", email:" TEST@EXAMPLE.COM ", password:"long secure password", requestedRole:"admin" }); expect(value.email).toBe("test@example.com"); expect(value.fullName).toBe("Test User"); expect(registerSchema.safeParse({ ...value, roles:["admin"] }).success).toBe(false);
+  });
+  it("rejects executable URLs, invalid contacts, and unknown timezone", () => {
+    expect(customerSchema.safeParse({ displayName:"Company", customerType:"Other", countryCode:"US", website:"javascript:alert(1)" }).success).toBe(false); expect(contactSchema.safeParse({ fullName:"", isPrimary:true }).success).toBe(false); expect(contactSchema.safeParse({ fullName:"Name", salutation:"Sir" }).success).toBe(false); expect(companySchema.safeParse({ timezone:"Unknown/Somewhere", defaultCurrency:"USD" }).success).toBe(false);
+  });
+});
