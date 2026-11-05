@@ -1,0 +1,20 @@
+{
+  "routes": [
+    { "path": "/", "title": "Dashboard" },
+    { "path": "/login", "title": "Sign in" },
+    { "path": "/register", "title": "Request access" },
+    { "path": "/admin-setup", "title": "Administrator setup" },
+    { "path": "/verify-email", "title": "Verify email" },
+    { "path": "/forgot-password", "title": "Forgot password" },
+    { "path": "/reset-password", "title": "Reset password" },
+    { "path": "/profile", "title": "My profile" },
+    { "path": "/customers", "title": "Customers" },
+    { "path": "/customers/new", "title": "New customer" },
+    { "path": "/customers/:id", "title": "Customer detail" },
+    { "path": "/customers/:id/edit", "title": "Edit customer" },
+    { "path": "/settings/users", "title": "User management" },
+    { "path": "/settings/roles", "title": "Roles & permissions" },
+    { "path": "/settings/company", "title": "Youcai information" },
+    { "path": "/audit", "title": "Audit trail" }
+  ]
+}
