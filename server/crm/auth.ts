@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { registerSchema, emailSchema, passwordSchema } from "../../shared/crm";
 import { getPool, rows, run, transaction } from "./db";
-import { HttpError, hash, opaque, csrfFor, hashPassword, checkPassword, shouldBootstrap, getUser, resolveSession, sessionCookie, safeEqual, limitAuth, audit, lockSecurity } from "./security";
+import { BOOTSTRAP_EMAILS, HttpError, hash, opaque, csrfFor, hashPassword, checkPassword, shouldBootstrap, getUser, resolveSession, sessionCookie, safeEqual, limitAuth, audit, lockSecurity } from "./security";
 import { emailReady, sendAccountMail } from "./mail";
 import { checkOwnerAdminInvitation, completeOwnerAdminSetup } from "./admin-enrollment";
 export const authRouter = Router();
@@ -116,7 +116,15 @@ authRouter.post("/resend", asyncRoute(async (req, res) => {
 }));
 authRouter.post("/forgot", asyncRoute(async (req, res) => {
   setup(); const parsed = z.object({ email: emailSchema }).strict().safeParse(req.body); await limitAuth(req, "forgot", parsed.success ? parsed.data.email : undefined);
-  if (parsed.success) { const user = (await rows(getPool(), "SELECT id, email_normalized FROM crm_users WHERE email_normalized = ? AND email_verified_at IS NOT NULL", [parsed.data.email]))[0]; if (user) await issueMail(user.id, user.email_normalized, "RESET"); }
+  if (parsed.success) {
+    const db = getPool();
+    const record = (await rows(db, "SELECT id FROM crm_users WHERE email_normalized = ?", [parsed.data.email]))[0];
+    // getUser derives owner completion from database proof, not an email match or requested role.
+    const user = record ? await getUser(db, record.id) : null;
+    const completedOwner = user?.accessAuthorized === true && user.accessMethod === "OWNER_PROVISIONED" && BOOTSTRAP_EMAILS.has(user.email);
+    // Recovery changes credentials only; suspension, demotion and pending approval still apply.
+    if (user && (user.emailVerified || completedOwner)) await issueMail(user.id, user.email, "RESET");
+  }
   return res.json({ message });
 }));
 authRouter.post("/reset", asyncRoute(async (req, res) => {
