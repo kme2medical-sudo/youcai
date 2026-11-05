@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
+import appConfig from "../../app.config";
 import type { User, PermissionCode } from "../../shared/crm";
 import { PERMISSION_CODES } from "../../shared/crm";
 import { type Db, getPool, rows, run, transaction, iso } from "./db";
@@ -71,8 +72,15 @@ export function checkOrigin(req: Request): void {
   // Non-browser callers omit Origin, but browsers cannot bypass JSON + origin checks via HTML forms.
   if (!raw) return;
   let incoming: URL; try { incoming = new URL(raw); } catch { throw new HttpError(403, "Untrusted request origin"); }
-  const allowed = new Set<string>();
-  if (process.env.APP_PUBLIC_URL) { try { allowed.add(new URL(process.env.APP_PUBLIC_URL).origin); } catch { /* fail closed */ } }
+  // Published requests may have an internal Host after proxying. The website's public
+  // origin is public metadata, not dependent on optional outbound-email configuration.
+  const allowed = new Set<string>([appConfig.publicOrigin]);
+  if (process.env.APP_PUBLIC_URL) {
+    try {
+      const configured = new URL(process.env.APP_PUBLIC_URL);
+      if (configured.protocol === "https:" && !configured.username && !configured.password && configured.pathname === "/" && !configured.search && !configured.hash) allowed.add(configured.origin);
+    } catch { /* Malformed optional mail configuration cannot add an untrusted origin. */ }
+  }
   // Preview and same-origin production: HTTPS only, compare public Host, not internal req.protocol.
   const host = req.get("host");
   if (host && incoming.protocol === "https:" && incoming.host === host) return;

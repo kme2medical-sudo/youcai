@@ -60,6 +60,20 @@ describe("backend policy and credential isolation", () => {
     expect(() => checkOrigin(req({ origin: "https://preview.example", host: "preview.example" }))).not.toThrow(); expect(() => checkOrigin(req({ origin: "https://evil.example", host: "preview.example" }))).toThrow(); expect(() => checkOrigin(req({ origin: "http://preview.example", host: "preview.example" }))).toThrow();
     vi.stubEnv("APP_PUBLIC_URL", "https://app.youcaimedical.example"); expect(() => checkOrigin(req({ origin: "https://app.youcaimedical.example", host: "internal.service" }))).not.toThrow(); expect(() => checkOrigin(req({ referer: "https://evil.example/login", host: "preview.example" }))).toThrow();
   });
+  it("allows the real published website behind an internal proxy independently of email settings", () => {
+    const req = { get: (key: string) => ({ origin: "https://youcai-usq7zhae.manus.space", host: "internal.service:3000" } as Record<string, string>)[key] } as any;
+    for (const value of ["", "invalid-placeholder", "https://unrelated.example/path"]) {
+      vi.stubEnv("APP_PUBLIC_URL", value);
+      expect(() => checkOrigin(req)).not.toThrow();
+    }
+  });
+  it("rejects lookalike and insecure origins rather than bypassing origin validation for setup", () => {
+    vi.stubEnv("APP_PUBLIC_URL", "https://user:password@evil.example/");
+    for (const origin of ["https://youcai-usq7zhae.manus.space.attacker.example", "http://youcai-usq7zhae.manus.space", "https://evil.example", "null"]) {
+      const req = { get: (key: string) => ({ origin, host: "internal.service:3000" } as Record<string, string>)[key] } as any;
+      expect(() => checkOrigin(req)).toThrow("Untrusted request origin");
+    }
+  });
   it("mail is unavailable without config and injection is forbidden in production", () => {
     vi.stubEnv("RESEND_API_KEY", ""); vi.stubEnv("EMAIL_FROM", ""); vi.stubEnv("APP_PUBLIC_URL", ""); expect(emailReady()).toBe(false);
     setTestMailTransport(async () => {}); expect(emailReady()).toBe(true); vi.stubEnv("NODE_ENV", "production"); expect(emailReady()).toBe(false); expect(() => setTestMailTransport(async () => {})).toThrow();
